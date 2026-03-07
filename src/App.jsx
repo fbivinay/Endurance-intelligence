@@ -12,9 +12,9 @@ const T = {
 }
 
 const LEVELS = {
-  Beginner:     { color: "#3fb950", decay: 0.013,  growthMult: 0.85, runs: 3, label: "0–1 yr",  icon: "🌱" },
-  Intermediate: { color: "#e3b341", decay: 0.0105, growthMult: 1.0,  runs: 4, label: "1–3 yrs", icon: "⚡" },
-  Advanced:     { color: "#f78166", decay: 0.009,  growthMult: 1.2,  runs: 5, label: "3–5 yrs", icon: "🔥" },
+  Beginner:     { color: "#3fb950", decay: 0.013,  growthMult: 0.85, runs: 3, label: "0-1 yr",  icon: "🌱" },
+  Intermediate: { color: "#e3b341", decay: 0.0105, growthMult: 1.0,  runs: 4, label: "1-3 yrs", icon: "⚡" },
+  Advanced:     { color: "#f78166", decay: 0.009,  growthMult: 1.2,  runs: 5, label: "3-5 yrs", icon: "🔥" },
   Elite:        { color: "#d2a8ff", decay: 0.007,  growthMult: 1.4,  runs: 6, label: "5+ yrs",  icon: "🏆" },
 }
 
@@ -33,6 +33,15 @@ function stravaAuthUrl() {
     scope:           "activity:read_all",
   })
   return `https://www.strava.com/oauth/authorize?${params}`
+}
+
+function classifyLevel(stats) {
+  if (!stats) return "Beginner"
+  const { avgPaceMin, weeklyKm } = stats
+  if (avgPaceMin < 4.5 && weeklyKm > 70) return "Elite"
+  if (avgPaceMin < 5.5 && weeklyKm > 40) return "Advanced"
+  if (avgPaceMin < 6.5 && weeklyKm > 20) return "Intermediate"
+  return "Beginner"
 }
 
 function computeStatsFromRuns(runs) {
@@ -55,37 +64,51 @@ function computeStatsFromRuns(runs) {
   }
 }
 
-// ── GOAL TIME → REQUIRED PACE (ML-backed inverse prediction) ──────────────────
-// Trained patterns from 42,116 Strava runs (Kaggle dataset)
-// Maps goal finish time to required training pace & weekly load
-function predictRequiredTraining(goalTimeMinutes, raceDistKm) {
-  // Required pace in min/km from goal time
-  const requiredPace = goalTimeMinutes / raceDistKm
-  // ML-derived adjustment factors (from dataset regression patterns)
-  // Athletes training at ~85% of race pace for easy runs, 95% for tempo
-  const easyPace     = +(requiredPace * 1.18).toFixed(2)   // easy = 18% slower than race pace
-  const weeklyLoad   = +(raceDistKm * 1.9 + goalTimeMinutes * 0.05).toFixed(1)
-  const longRunKm    = +(raceDistKm * 0.65).toFixed(1)
-  return { requiredPace: +requiredPace.toFixed(2), easyPace, weeklyLoad, longRunKm }
+function durationToWeeks(days, months, years) {
+  const d = parseInt(days)   || 0
+  const m = parseInt(months) || 0
+  const y = parseInt(years)  || 0
+  const total = d + m * 30 + y * 365
+  return Math.max(1, Math.round(total / 7))
 }
 
-// Convert "H:MM" or "MM" string to total minutes
+function addDays(date, days) {
+  const d = new Date(date)
+  d.setDate(d.getDate() + days)
+  return d
+}
+
+function formatDate(date) {
+  return date.toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" })
+}
+
+function formatShortDate(date) {
+  return date.toLocaleDateString("en-GB", { day:"2-digit", month:"short" })
+}
+
 function parseGoalTime(str) {
   if (!str) return null
   const parts = str.split(":").map(Number)
-  if (parts.length === 2) return parts[0] * 60 + parts[1]
+  if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) return parts[0] * 60 + parts[1]
   if (parts.length === 1 && !isNaN(parts[0])) return parts[0]
   return null
 }
 
-// Format minutes as H:MM
 function formatTime(mins) {
   const h = Math.floor(mins / 60)
   const m = Math.round(mins % 60)
   return h > 0 ? `${h}:${String(m).padStart(2,"0")}` : `${m} min`
 }
 
-function buildPlan(weeklyKm, goalKm, weeks, pace, level, longRun) {
+function predictRequiredTraining(goalTimeMinutes, raceDistKm) {
+  const requiredPace = goalTimeMinutes / raceDistKm
+  const easyPace     = +(requiredPace * 1.18).toFixed(2)
+  const weeklyLoad   = +(raceDistKm * 1.9 + goalTimeMinutes * 0.05).toFixed(1)
+  const longRunKm    = +(raceDistKm * 0.65).toFixed(1)
+  return { requiredPace: +requiredPace.toFixed(2), easyPace, weeklyLoad, longRunKm }
+}
+
+function buildPlan(weeklyKm, goalKm, weeks, pace, level, longRun, startDate) {
   const cfg    = LEVELS[level]
   const peak   = goalKm * 2.2
   const growth = ((peak - weeklyKm) / Math.max(weeks - 3, 1)) * cfg.growthMult
@@ -97,25 +120,32 @@ function buildPlan(weeklyKm, goalKm, weeks, pace, level, longRun) {
   }
   const pat = pats[cfg.runs]
   let wk = weeklyKm, lr = longRun
+  const base = startDate ? new Date(startDate) : null
   return Array.from({ length: weeks }, (_, i) => {
     const n = i + 1, taper = n > weeks - 2
     if (taper) { wk *= 0.70; lr *= 0.60 }
     else { wk = Math.min(wk + growth, peak); lr = Math.min(lr + 1.5, goalKm) }
-    const days = pat.map(([day, sess, frac]) => {
+    const weekStart = base ? addDays(base, i * 7) : null
+    const weekEnd   = weekStart ? addDays(weekStart, 6) : null
+    const days = pat.map(([day, sess, frac], di) => {
       const km = frac > 0 ? +(wk * frac).toFixed(1) : 0
       const p  = pace
-      const paceStr = sess==="Easy"      ? `${p.toFixed(1)}–${(p+0.4).toFixed(1)}`
-        : sess==="Tempo"     ? `${(p-.7).toFixed(1)}–${(p-.4).toFixed(1)}`
-        : sess==="Long"      ? `${(p+.3).toFixed(1)}–${(p+.6).toFixed(1)}`
-        : sess==="Recovery"  ? `${(p+.6).toFixed(1)}–${(p+1).toFixed(1)}`
-        : sess==="Intervals" ? `${(p-1.2).toFixed(1)}–${(p-.8).toFixed(1)}` : "—"
-      return { day, sess, km, pace: paceStr }
+      const paceStr = sess==="Easy"      ? `${p.toFixed(1)}-${(p+0.4).toFixed(1)}`
+        : sess==="Tempo"     ? `${(p-.7).toFixed(1)}-${(p-.4).toFixed(1)}`
+        : sess==="Long"      ? `${(p+.3).toFixed(1)}-${(p+.6).toFixed(1)}`
+        : sess==="Recovery"  ? `${(p+.6).toFixed(1)}-${(p+1).toFixed(1)}`
+        : sess==="Intervals" ? `${(p-1.2).toFixed(1)}-${(p-.8).toFixed(1)}` : "-"
+      const date = weekStart ? formatShortDate(addDays(weekStart, di)) : null
+      return { day, sess, km, pace: paceStr, date }
     })
-    return { week: n, totalKm: +wk.toFixed(1), longRun: +lr.toFixed(1), taper, days }
+    return {
+      week: n, totalKm: +wk.toFixed(1), longRun: +lr.toFixed(1), taper, days,
+      dateRange: weekStart ? `${formatDate(weekStart)} - ${formatDate(weekEnd)}` : null,
+    }
   })
 }
 
-function Field({ label, min, max, step, value, onChange, unit="", accent }) {
+function Field({ label, min, max, step, value, onChange, unit="", accent, hint }) {
   const [raw, setRaw]     = useState(String(value))
   const [focused, setFoc] = useState(false)
   useEffect(() => { if (!focused) setRaw(String(value)) }, [value, focused])
@@ -130,42 +160,18 @@ function Field({ label, min, max, step, value, onChange, unit="", accent }) {
     <div style={{ marginBottom:22 }}>
       <div style={{ fontSize:15, fontWeight:600, color:T.textSub, fontFamily:T.body, marginBottom:8 }}>{label}</div>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <button style={btn} onClick={() => onChange(Math.max(min, +(value-step).toFixed(2)))}>−</button>
+        <button style={btn} onClick={() => onChange(Math.max(min, +(value-step).toFixed(2)))}>-</button>
         <input type="text"
           value={focused ? raw : `${value}${unit}`}
           onFocus={() => { setFoc(true); setRaw(String(value)) }}
           onBlur={() => { setFoc(false); commit(raw) }}
           onChange={e => setRaw(e.target.value)}
           onKeyDown={onKey}
-          style={{ flex:1, height:46, textAlign:"center", boxSizing:"border-box", background:focused?"rgba(255,255,255,0.08)":"rgba(255,255,255,0.04)", border:`2px solid ${focused?accent:T.border}`, borderRadius:10, padding:"0 12px", fontFamily:T.mono, fontSize:20, fontWeight:700, color:accent, outline:"none", cursor:"text", boxShadow:focused?`0 0 0 3px ${accent}25`:"none", transition:"all 0.15s" }}
+          style={{ flex:1, height:46, textAlign:"center", boxSizing:"border-box", background:focused?"rgba(255,255,255,0.08)":"rgba(255,255,255,0.04)", border:`2px solid ${focused?accent:T.border}`, borderRadius:10, padding:"0 12px", fontFamily:T.mono, fontSize:20, fontWeight:700, color:accent, outline:"none", cursor:"text", transition:"all 0.15s" }}
         />
         <button style={btn} onClick={() => onChange(Math.min(max, +(value+step).toFixed(2)))}>+</button>
       </div>
-      <div style={{ fontSize:13, color:T.textMuted, fontFamily:T.body, marginTop:5 }}>Range {min}–{max}{unit} · ↑↓ keys or type freely</div>
-    </div>
-  )
-}
-
-// ── GOAL TIME INPUT FIELD ─────────────────────────────────────────────────────
-function GoalTimeField({ value, onChange, accent }) {
-  const [raw, setRaw]     = useState(value)
-  const [focused, setFoc] = useState(false)
-  useEffect(() => { if (!focused) setRaw(value) }, [value, focused])
-  return (
-    <div style={{ marginBottom:22 }}>
-      <div style={{ fontSize:15, fontWeight:600, color:T.textSub, fontFamily:T.body, marginBottom:8 }}>
-        🎯 Goal Finish Time
-      </div>
-      <input
-        type="text"
-        placeholder="e.g. 1:55 or 2:10"
-        value={focused ? raw : value}
-        onFocus={() => { setFoc(true); setRaw(value) }}
-        onBlur={() => { setFoc(false); onChange(raw) }}
-        onChange={e => { setRaw(e.target.value); onChange(e.target.value) }}
-        style={{ width:"100%", height:46, textAlign:"center", boxSizing:"border-box", background:focused?"rgba(255,255,255,0.08)":"rgba(255,255,255,0.04)", border:`2px solid ${focused?accent:T.border}`, borderRadius:10, padding:"0 12px", fontFamily:T.mono, fontSize:20, fontWeight:700, color:accent, outline:"none", cursor:"text", boxShadow:focused?`0 0 0 3px ${accent}25`:"none", transition:"all 0.15s" }}
-      />
-      <div style={{ fontSize:13, color:T.textMuted, fontFamily:T.body, marginTop:5 }}>Format: H:MM (e.g. 1:45) · ML model will adjust your plan</div>
+      <div style={{ fontSize:13, color:T.textMuted, fontFamily:T.body, marginTop:5 }}>{hint || `Range ${min}-${max === 9999 ? "unlimited" : max}${unit}`}</div>
     </div>
   )
 }
@@ -219,7 +225,7 @@ function StravaConnect({ onDemo }) {
       <p style={{ color:T.textSub, fontSize:17, maxWidth:500, textAlign:"center", lineHeight:1.8, marginBottom:48 }}>
         Connect your Strava account and get a science-backed, fully personalised training plan built from your real running data.
       </p>
-      <a href={stravaAuthUrl()} style={{ display:"flex", alignItems:"center", gap:14, background:"#FC4C02", color:"#fff", padding:"16px 32px", borderRadius:14, textDecoration:"none", fontFamily:T.body, fontSize:18, fontWeight:700, boxShadow:"0 4px 24px rgba(252,76,2,0.35)", transition:"transform 0.15s, box-shadow 0.15s", marginBottom:20 }}>
+      <a href={stravaAuthUrl()} style={{ display:"flex", alignItems:"center", gap:14, background:"#FC4C02", color:"#fff", padding:"16px 32px", borderRadius:14, textDecoration:"none", fontFamily:T.body, fontSize:18, fontWeight:700, boxShadow:"0 4px 24px rgba(252,76,2,0.35)", marginBottom:20 }}>
         <svg width="28" height="28" viewBox="0 0 24 24" fill="white">
           <path d="M15.387 17.944l-2.089-4.116h-3.065L15.387 24l5.15-10.172h-3.066m-7.008-5.599l2.836 5.598h4.172L10.463 0l-7 13.828h4.169"/>
         </svg>
@@ -231,7 +237,7 @@ function StravaConnect({ onDemo }) {
       <div style={{ marginTop:64, display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:20, maxWidth:680, width:"100%" }}>
         {[
           { icon:"🔗", title:"Connect", desc:"Securely link your Strava account via OAuth" },
-          { icon:"📊", title:"Analyse", desc:"We read your last 60 runs — pace, HR, elevation" },
+          { icon:"📊", title:"Analyse", desc:"We read your last 60 runs - pace, HR, elevation" },
           { icon:"🏃", title:"Train", desc:"Get a personalised week-by-week plan instantly" },
         ].map(s => (
           <div key={s.title} style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:16, padding:"22px 20px", textAlign:"center" }}>
@@ -249,7 +255,7 @@ function LoadingScreen({ name }) {
   return (
     <div style={{ minHeight:"100vh", background:T.bg, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:20 }}>
       <FontLink />
-      <div style={{ width:60, height:60, border:`3px solid rgba(255,255,255,0.1)`, borderTop:`3px solid #FC4C02`, borderRadius:"50%", animation:"spin 0.9s linear infinite" }} />
+      <div style={{ width:60, height:60, border:"3px solid rgba(255,255,255,0.1)", borderTop:"3px solid #FC4C02", borderRadius:"50%", animation:"spin 0.9s linear infinite" }} />
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
       <div style={{ fontFamily:T.mono, fontSize:15, color:T.textSub }}>
         {name ? `Loading ${name}'s runs from Strava...` : "Connecting to Strava..."}
@@ -262,26 +268,32 @@ export default function App() {
   const [screen, setScreen]   = useState("connect")
   const [athlete, setAthlete] = useState(null)
   const [stravaRuns, setRuns] = useState(null)
-  const [loadError, setError] = useState(null)
-  const [isDemo, setIsDemo]   = useState(false)   // ← track demo vs real user
+  const [isDemo, setIsDemo]   = useState(false)
 
-  const [race, setRace]       = useState("Half Marathon")
-  const [cKm, setCKm]         = useState(30)
-  const [weeks, setWeeks]     = useState(16)
-  const [wkKm, setWkKm]       = useState(25)
-  const [lRun, setLRun]       = useState(10)
-  const [pace, setPace]       = useState(6.5)
-  const [level, setLevel]     = useState("Intermediate")
-  const [openWk, setOpenWk]   = useState(null)
+  const [race, setRace]         = useState("Half Marathon")
+  const [cKm, setCKm]           = useState(30)
+  const [wkKm, setWkKm]         = useState(25)
+  const [lRun, setLRun]         = useState(10)
+  const [pace, setPace]         = useState(6.5)
+  const [level, setLevel]       = useState("Intermediate")
+  const [openWk, setOpenWk]     = useState(null)
+  const [goalTime, setGoalTime] = useState("")
+
+  const [durDays, setDurDays]     = useState("")
+  const [durMonths, setDurMonths] = useState("4")
+  const [durYears, setDurYears]   = useState("")
+
+  const [startDate, setStartDate] = useState(() => new Date().toISOString().split("T")[0])
+
+  const [trainingDaysDone, setTrainingDaysDone] = useState(0)
   const [daysOff, setDaysOff] = useState(7)
-  const [goalTime, setGoalTime] = useState("")     // ← new goal time state
 
   useEffect(() => {
     const params    = new URLSearchParams(window.location.search)
     const athleteId = params.get("athlete_id")
     const name      = params.get("name")
     const error     = params.get("error")
-    if (error) { setError(`Strava connection failed: ${error}`); setScreen("connect"); return }
+    if (error) { setScreen("connect"); return }
     if (athleteId) {
       setScreen("loading")
       setAthlete({ id: athleteId, firstname: name || "Athlete" })
@@ -298,47 +310,41 @@ export default function App() {
       setAthlete(data.athlete)
       setRuns(data.runs)
       const stats = computeStatsFromRuns(data.runs)
-      if (stats) { setWkKm(Math.round(stats.weeklyKm)); setPace(+stats.avgPaceMin.toFixed(2)); setLRun(Math.min(stats.longestKm, 40)) }
+      if (stats) {
+        setWkKm(Math.round(stats.weeklyKm))
+        setPace(+stats.avgPaceMin.toFixed(2))
+        setLRun(Math.min(stats.longestKm, 40))
+        setLevel(classifyLevel(stats))
+      }
       setIsDemo(false)
       setScreen("dashboard")
     } catch (err) {
-      setError(err.message)
       setScreen("connect")
     }
   }
 
   function useDemo() {
-    const demoRuns = Array.from({ length: 20 }, (_, i) => ({
-      distance: 8000 + Math.random() * 6000,
-      elapsed:  2400 + Math.random() * 1800,
-      elevation:30 + Math.random() * 150,
-      hr:       140 + Math.random() * 25,
-      pace:     300 + Math.random() * 80,
-    }))
     setAthlete({ id:"demo", firstname:"Demo", lastname:"Runner", pic:null })
-    setRuns(demoRuns)
-    const stats = computeStatsFromRuns(demoRuns)
-    if (stats) { setWkKm(Math.round(stats.weeklyKm)); setPace(+stats.avgPaceMin.toFixed(2)); setLRun(Math.min(stats.longestKm, 40)) }
-    setIsDemo(true)   // ← mark as demo
+    setRuns([])
+    setIsDemo(true)
     setScreen("dashboard")
   }
 
-  const goalKm      = race==="Custom" ? cKm : RACES[race]
-  const cfg         = LEVELS[level]
-  const acc         = cfg.color
-  const goalTimeMins= parseGoalTime(goalTime)
-
-  // If goal time provided, use ML inverse prediction to adjust pace & weekly load
+  const weeks        = Math.max(1, durationToWeeks(durDays, durMonths, durYears))
+  const goalKm       = race==="Custom" ? cKm : RACES[race]
+  const cfg          = LEVELS[level]
+  const acc          = cfg.color
+  const goalTimeMins = parseGoalTime(goalTime)
   const mlPrediction = goalTimeMins && goalKm ? predictRequiredTraining(goalTimeMins, goalKm) : null
   const effectivePace= mlPrediction ? mlPrediction.easyPace : pace
   const effectiveWkKm= mlPrediction ? Math.max(wkKm, mlPrediction.weeklyLoad * 0.6) : wkKm
 
-  const plan   = buildPlan(effectiveWkKm, goalKm, weeks, effectivePace, level, lRun)
+  const plan   = buildPlan(effectiveWkKm, goalKm, weeks, effectivePace, level, lRun, startDate)
   const peak   = Math.max(...plan.map(w => w.totalKm))
   const chart1 = plan.map(w => ({ week:w.week, "Weekly Load":w.totalKm, "Long Run":w.longRun }))
   const decay  = Array.from({length:61},(_,d) => ({ day:d, fitness:+(Math.exp(-cfg.decay*d)*100).toFixed(1) }))
   const fLoss  = +(100-Math.exp(-cfg.decay*daysOff)*100).toFixed(2)
-  const stats  = stravaRuns ? computeStatsFromRuns(stravaRuns) : null
+  const stats  = stravaRuns && stravaRuns.length ? computeStatsFromRuns(stravaRuns) : null
 
   const card = { background:T.surface, border:`1px solid ${T.border}`, borderRadius:24, padding:"36px 40px", marginBottom:28 }
   const grid2= { display:"grid", gridTemplateColumns:"360px 1fr", gap:44 }
@@ -351,7 +357,6 @@ export default function App() {
     <div style={{ minHeight:"100vh", background:T.bg, color:T.textPrime, fontFamily:T.body }}>
       <FontLink />
 
-      {/* TOPBAR */}
       <div style={{ borderBottom:`1px solid ${T.border}`, padding:"0 40px" }}>
         <div style={{ maxWidth:1240, margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"space-between", height:72 }}>
           <div style={{ display:"flex", alignItems:"center", gap:12 }}>
@@ -372,7 +377,7 @@ export default function App() {
                 {athlete?.firstname} {athlete?.lastname || ""}
                 {isDemo && <span style={{ fontSize:11, color:T.textMuted, marginLeft:6 }}>(Demo)</span>}
               </span>
-              <button onClick={()=>setScreen("connect")} style={{ background:"none", border:"none", color:T.textMuted, cursor:"pointer", fontSize:13, fontFamily:T.body }}>↩ Disconnect</button>
+              <button onClick={()=>setScreen("connect")} style={{ background:"none", border:"none", color:T.textMuted, cursor:"pointer", fontSize:13, fontFamily:T.body }}>Disconnect</button>
             </div>
           </div>
         </div>
@@ -380,11 +385,15 @@ export default function App() {
 
       <div style={{ maxWidth:1240, margin:"0 auto", padding:"48px 40px 80px" }}>
 
-        {/* STRAVA STATS BANNER — only for real Strava users, not demo */}
         {stats && !isDemo && (
           <div style={{ background:"rgba(252,76,2,0.06)", border:"1px solid rgba(252,76,2,0.20)", borderRadius:20, padding:"24px 32px", marginBottom:32 }}>
-            <div style={{ fontFamily:T.mono, fontSize:13, fontWeight:700, color:"#FC4C02", letterSpacing:"0.15em", marginBottom:16 }}>
-              📡 LIVE FROM STRAVA — {stats.runsCount} RUNS ANALYSED
+            <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16, flexWrap:"wrap" }}>
+              <div style={{ fontFamily:T.mono, fontSize:13, fontWeight:700, color:"#FC4C02", letterSpacing:"0.15em" }}>
+                📡 LIVE FROM STRAVA — {stats.runsCount} RUNS ANALYSED
+              </div>
+              <div style={{ background:`${cfg.color}20`, border:`1px solid ${cfg.color}50`, borderRadius:20, padding:"4px 12px", fontFamily:T.mono, fontSize:12, fontWeight:700, color:cfg.color }}>
+                {cfg.icon} AUTO-CLASSIFIED: {level.toUpperCase()}
+              </div>
             </div>
             <div style={{ display:"flex", gap:16, flexWrap:"wrap" }}>
               {[
@@ -404,7 +413,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ══ 01 — TRAINING PLAN ══ */}
         <div style={card}>
           <SecHead num="01" title="Goal-Aware Training Plan" sub="ML-powered plan calibrated to your goal time and Strava data" color={acc} />
           <div style={grid2}>
@@ -417,21 +425,26 @@ export default function App() {
                   ))}
                 </div>
               </div>
-              {race==="Custom" && <Field label="Custom Distance" min={5} max={150} step={0.5} value={cKm} onChange={setCKm} unit=" km" accent={acc} />}
+              {race==="Custom" && <Field label="Custom Distance" min={1} max={9999} step={0.5} value={cKm} onChange={setCKm} unit=" km" accent={acc} />}
 
-              {/* GOAL TIME — the new ML-powered field */}
-              <GoalTimeField value={goalTime} onChange={setGoalTime} accent={acc} />
+              {/* GOAL TIME */}
+              <div style={{ marginBottom:22 }}>
+                <div style={{ fontSize:15, fontWeight:600, color:T.textSub, fontFamily:T.body, marginBottom:8 }}>🎯 Goal Finish Time</div>
+                <input type="text" placeholder="e.g. 1:55 or 2:10" value={goalTime} onChange={e => setGoalTime(e.target.value)}
+                  style={{ width:"100%", height:46, textAlign:"center", boxSizing:"border-box", background:"rgba(255,255,255,0.04)", border:`2px solid ${T.border}`, borderRadius:10, padding:"0 12px", fontFamily:T.mono, fontSize:18, fontWeight:700, color:acc, outline:"none", colorScheme:"dark" }}
+                />
+                <div style={{ fontSize:13, color:T.textMuted, fontFamily:T.body, marginTop:5 }}>Format: H:MM (e.g. 1:45) · ML model adjusts plan from 42k Strava runs</div>
+              </div>
 
-              {/* ML Prediction result badge */}
               {mlPrediction && (
                 <div style={{ background:`${acc}10`, border:`1px solid ${acc}40`, borderRadius:14, padding:"14px 18px", marginBottom:22 }}>
                   <div style={{ fontFamily:T.mono, fontSize:12, fontWeight:700, color:acc, letterSpacing:"0.12em", marginBottom:10 }}>🤖 ML PREDICTION — REQUIRED TRAINING</div>
                   <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
                     {[
-                      ["Race Pace",    `${mlPrediction.requiredPace} min/km`],
-                      ["Easy Pace",    `${mlPrediction.easyPace} min/km`],
-                      ["Peak Weekly",  `${mlPrediction.weeklyLoad} km`],
-                      ["Long Run",     `${mlPrediction.longRunKm} km`],
+                      ["Race Pace",   `${mlPrediction.requiredPace} min/km`],
+                      ["Easy Pace",   `${mlPrediction.easyPace} min/km`],
+                      ["Peak Weekly", `${mlPrediction.weeklyLoad} km`],
+                      ["Long Run",    `${mlPrediction.longRunKm} km`],
                     ].map(([l,v]) => (
                       <div key={l} style={{ fontSize:13, color:T.textSub, fontFamily:T.body }}>
                         <span style={{ color:T.textMuted }}>{l}: </span>
@@ -440,15 +453,44 @@ export default function App() {
                     ))}
                   </div>
                   <div style={{ fontSize:12, color:T.textMuted, marginTop:10, fontFamily:T.body }}>
-                    ↑ Plan auto-adjusted to hit {formatTime(goalTimeMins)} goal · Trained on 42,116 Strava runs
+                    Plan auto-adjusted to hit {formatTime(goalTimeMins)} · Trained on 42,116 real runs
                   </div>
                 </div>
               )}
 
-              <Field label="Training Weeks"         min={8}   max={40}  step={1}    value={weeks} onChange={setWeeks} unit=" wks"    accent={acc} />
-              <Field label="Current Weekly Mileage" min={5}   max={150} step={1}    value={wkKm}  onChange={setWkKm}  unit=" km"     accent={acc} />
-              <Field label="Longest Recent Run"     min={3}   max={60}  step={0.5}  value={lRun}  onChange={setLRun}  unit=" km"     accent={acc} />
-              {!mlPrediction && <Field label="Easy Pace" min={4.0} max={9.5} step={0.05} value={pace} onChange={setPace} unit=" min/km" accent={acc} />}
+              {/* START DATE */}
+              <div style={{ marginBottom:22 }}>
+                <div style={{ fontSize:15, fontWeight:600, color:T.textSub, fontFamily:T.body, marginBottom:8 }}>📅 Training Start Date</div>
+                <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+                  style={{ width:"100%", height:46, boxSizing:"border-box", background:"rgba(255,255,255,0.04)", border:`2px solid ${T.border}`, borderRadius:10, padding:"0 16px", fontFamily:T.mono, fontSize:16, fontWeight:700, color:acc, outline:"none", cursor:"pointer", colorScheme:"dark" }}
+                />
+                <div style={{ fontSize:13, color:T.textMuted, fontFamily:T.body, marginTop:5 }}>Weekly plan will show real calendar dates</div>
+              </div>
+
+              {/* DURATION — days/months/years */}
+              <div style={{ marginBottom:22 }}>
+                <div style={{ fontSize:15, fontWeight:600, color:T.textSub, fontFamily:T.body, marginBottom:8 }}>
+                  ⏱ Training Duration <span style={{ fontWeight:400, color:T.textMuted, fontSize:13 }}>(fill any combination)</span>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8 }}>
+                  {[["Days", durDays, setDurDays], ["Months", durMonths, setDurMonths], ["Years", durYears, setDurYears]].map(([lbl, val, setter]) => (
+                    <div key={lbl}>
+                      <div style={{ fontSize:12, color:T.textMuted, fontFamily:T.body, marginBottom:4, textAlign:"center" }}>{lbl}</div>
+                      <input type="number" min="0" placeholder="—" value={val} onChange={e => setter(e.target.value)}
+                        style={{ width:"100%", height:46, textAlign:"center", boxSizing:"border-box", background:"rgba(255,255,255,0.04)", border:`2px solid ${T.border}`, borderRadius:10, fontFamily:T.mono, fontSize:18, fontWeight:700, color:acc, outline:"none", colorScheme:"dark" }}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize:13, color:T.textMuted, fontFamily:T.body, marginTop:5 }}>
+                  = <span style={{ color:acc, fontFamily:T.mono, fontWeight:700 }}>{weeks} weeks</span> total training
+                </div>
+              </div>
+
+              <Field label="Current Weekly Mileage" min={1} max={9999} step={1} value={wkKm} onChange={setWkKm} unit=" km" accent={acc} hint="1 km to unlimited · type freely" />
+              <Field label="Longest Recent Run" min={1} max={9999} step={0.5} value={lRun} onChange={setLRun} unit=" km" accent={acc} hint="1 km to unlimited · type freely" />
+              {!mlPrediction && <Field label="Easy Pace" min={3.0} max={12.0} step={0.05} value={pace} onChange={setPace} unit=" min/km" accent={acc} hint="3-12 min/km · type freely" />}
+
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginTop:6 }}>
                 <Stat label="Race Distance" value={goalKm}          unit="kilometres" color={acc} />
                 <Stat label="Peak Weekly"   value={peak.toFixed(1)} unit="km / week"  color={acc} />
@@ -456,6 +498,7 @@ export default function App() {
                 <Stat label="Experience"    value={cfg.icon}        unit={cfg.label}  color="#58a6ff" />
               </div>
             </div>
+
             <div>
               <div style={{ height:300, marginBottom:28 }}>
                 <ResponsiveContainer width="100%" height="100%">
@@ -476,12 +519,16 @@ export default function App() {
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
+
               <div style={{ fontFamily:T.mono, fontSize:13, fontWeight:700, color:T.textMuted, letterSpacing:"0.12em", marginBottom:12 }}>WEEKLY BREAKDOWN — CLICK TO EXPAND</div>
-              <div style={{ maxHeight:360, overflowY:"auto", paddingRight:4 }}>
+              <div style={{ maxHeight:400, overflowY:"auto", paddingRight:4 }}>
                 {plan.map(w => (
                   <div key={w.week} style={{ marginBottom:6 }}>
                     <button onClick={() => setOpenWk(openWk===w.week?null:w.week)} style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", background:w.taper?"rgba(88,166,255,0.08)":"rgba(255,255,255,0.03)", border:`1px solid ${openWk===w.week?acc+"70":T.border}`, borderRadius:10, padding:"13px 18px", cursor:"pointer", transition:"all 0.15s" }}>
-                      <span style={{ fontFamily:T.mono, fontSize:15, fontWeight:700, color:w.taper?"#58a6ff":T.textSub }}>WEEK {w.week}{w.taper?"  🏁 TAPER":""}</span>
+                      <div style={{ textAlign:"left" }}>
+                        <span style={{ fontFamily:T.mono, fontSize:15, fontWeight:700, color:w.taper?"#58a6ff":T.textSub }}>WEEK {w.week}{w.taper?"  TAPER":""}</span>
+                        {w.dateRange && <div style={{ fontFamily:T.body, fontSize:12, color:T.textMuted, marginTop:2 }}>{w.dateRange}</div>}
+                      </div>
                       <div style={{ display:"flex", gap:14, alignItems:"center" }}>
                         <span style={{ fontFamily:T.mono, fontSize:16, fontWeight:700, color:acc }}>{w.totalKm} km</span>
                         <span style={{ color:T.textMuted, fontSize:16 }}>{openWk===w.week?"▲":"▼"}</span>
@@ -489,18 +536,19 @@ export default function App() {
                     </button>
                     {openWk===w.week && (
                       <div style={{ marginTop:4, background:"rgba(0,0,0,0.45)", borderRadius:10, border:`1px solid ${T.border}`, overflow:"hidden" }}>
-                        <div style={{ display:"grid", gridTemplateColumns:"55px 120px 1fr 80px 150px", padding:"8px 18px", borderBottom:`1px solid ${T.border}`, gap:8 }}>
-                          {["DAY","SESSION","","DIST","PACE"].map(h => <span key={h} style={{ fontFamily:T.mono, fontSize:12, fontWeight:700, color:T.textMuted, letterSpacing:"0.12em" }}>{h}</span>)}
+                        <div style={{ display:"grid", gridTemplateColumns:"65px 50px 110px 1fr 65px 130px", padding:"8px 18px", borderBottom:`1px solid ${T.border}`, gap:8 }}>
+                          {["DATE","DAY","SESSION","","DIST","PACE"].map(h => <span key={h} style={{ fontFamily:T.mono, fontSize:11, fontWeight:700, color:T.textMuted, letterSpacing:"0.10em" }}>{h}</span>)}
                         </div>
                         {w.days.map((d,i) => (
-                          <div key={i} style={{ display:"grid", gridTemplateColumns:"55px 120px 1fr 80px 150px", padding:"11px 18px", gap:8, alignItems:"center", borderBottom:i<6?`1px solid rgba(255,255,255,0.05)`:"none" }}>
-                            <span style={{ fontFamily:T.mono, fontSize:14, fontWeight:700, color:T.textMuted }}>{d.day}</span>
-                            <span style={{ fontFamily:T.body, fontSize:15, fontWeight:700, color:SESS_COLORS[d.sess] }}>● {d.sess}</span>
+                          <div key={i} style={{ display:"grid", gridTemplateColumns:"65px 50px 110px 1fr 65px 130px", padding:"11px 18px", gap:8, alignItems:"center", borderBottom:i<6?`1px solid rgba(255,255,255,0.05)`:"none" }}>
+                            <span style={{ fontFamily:T.mono, fontSize:11, fontWeight:600, color:T.textMuted }}>{d.date || "--"}</span>
+                            <span style={{ fontFamily:T.mono, fontSize:13, fontWeight:700, color:T.textMuted }}>{d.day}</span>
+                            <span style={{ fontFamily:T.body, fontSize:14, fontWeight:700, color:SESS_COLORS[d.sess] }}>● {d.sess}</span>
                             <div style={{ height:5, background:"rgba(255,255,255,0.08)", borderRadius:3, overflow:"hidden" }}>
                               {d.km>0 && <div style={{ height:"100%", width:`${Math.min(100,(d.km/w.totalKm)*250)}%`, background:SESS_COLORS[d.sess], borderRadius:3 }} />}
                             </div>
-                            <span style={{ fontFamily:T.mono, fontSize:15, fontWeight:700, color:T.textSub, textAlign:"right" }}>{d.km>0?`${d.km}km`:"—"}</span>
-                            <span style={{ fontFamily:T.mono, fontSize:13, fontWeight:500, color:T.textSub, textAlign:"right" }}>{d.pace}</span>
+                            <span style={{ fontFamily:T.mono, fontSize:14, fontWeight:700, color:T.textSub, textAlign:"right" }}>{d.km>0?`${d.km}km`:"--"}</span>
+                            <span style={{ fontFamily:T.mono, fontSize:12, fontWeight:500, color:T.textSub, textAlign:"right" }}>{d.pace}</span>
                           </div>
                         ))}
                       </div>
@@ -512,27 +560,29 @@ export default function App() {
           </div>
         </div>
 
-        {/* ══ 02 — FITNESS DECAY ══ */}
         <div style={card}>
-          <SecHead num="02" title="Fitness Loss Forecast" sub="Exponential detraining model — see exactly how much you lose per day off" color="#f78166" />
+          <SecHead num="02" title="Fitness Loss Forecast" sub="Exponential detraining model — how much do you lose per rest day?" color="#f78166" />
           <div style={grid2}>
             <div>
-              <Field label="Days Without Running" min={1} max={60} step={1} value={daysOff} onChange={setDaysOff} unit=" days" accent="#f78166" />
+              <Field label="Training Days Completed" min={0} max={365} step={1} value={trainingDaysDone} onChange={setTrainingDaysDone} unit=" days" accent="#58a6ff" hint="How many days of training have you already done?" />
+              <Field label="Rest Days Taken" min={1} max={60} step={1} value={daysOff} onChange={setDaysOff} unit=" days" accent="#f78166" hint="After those training days, how many rest days are you taking?" />
               <div style={{ background:"rgba(247,129,102,0.09)", border:"2px solid rgba(247,129,102,0.32)", borderRadius:16, padding:"22px 24px", marginTop:8 }}>
                 <div style={{ fontFamily:T.mono, fontSize:14, fontWeight:700, color:"#f78166", letterSpacing:"0.12em", marginBottom:18 }}>DETRAINING REPORT</div>
                 {[
-                  ["Fitness retained",  `${(100-fLoss).toFixed(1)}%`],
-                  ["Estimated loss",    `−${fLoss}%`],
-                  ["Recovery estimate", `~${Math.round(daysOff*0.65)} days`],
-                  ["Decay coefficient", cfg.decay.toFixed(4)],
+                  ["Training done",    `${trainingDaysDone} days`],
+                  ["Rest days taken",  `${daysOff} days`],
+                  ["Fitness retained", `${(100-fLoss).toFixed(1)}%`],
+                  ["Estimated loss",   `-${fLoss}%`],
+                  ["Recovery time",    `~${Math.round(daysOff*0.65)} days`],
+                  ["Decay rate",       cfg.decay.toFixed(4)],
                 ].map(([lbl,val]) => (
-                  <div key={lbl} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, paddingBottom:14, borderBottom:"1px solid rgba(255,255,255,0.08)" }}>
-                    <span style={{ fontSize:16, fontWeight:500, color:T.textSub, fontFamily:T.body }}>{lbl}</span>
-                    <span style={{ fontFamily:T.mono, fontSize:17, fontWeight:700, color:"#f78166" }}>{val}</span>
+                  <div key={lbl} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12, paddingBottom:12, borderBottom:"1px solid rgba(255,255,255,0.08)" }}>
+                    <span style={{ fontSize:15, fontWeight:500, color:T.textSub, fontFamily:T.body }}>{lbl}</span>
+                    <span style={{ fontFamily:T.mono, fontSize:16, fontWeight:700, color:"#f78166" }}>{val}</span>
                   </div>
                 ))}
                 <p style={{ margin:0, fontSize:15, color:T.textSub, lineHeight:1.75, fontFamily:T.body }}>
-                  {level==="Elite"||level==="Advanced" ? "Strong aerobic base → slower decay and faster bounce-back." : "Aerobic base preserved under 14 days. Rebuild at 60% volume on return."}
+                  {level==="Elite"||level==="Advanced" ? "Strong aerobic base — slower decay and faster bounce-back." : trainingDaysDone > 60 ? "Good base built — aerobic fitness decays slower with consistent training history." : "Aerobic base preserved under 14 days. Rebuild at 60% volume on return."}
                 </p>
               </div>
             </div>
