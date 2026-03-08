@@ -744,9 +744,22 @@ export default function App() {
   }
 
   // ── DERIVED VALUES ──────────────────────────────────────────────────────────
-  const totalWeeks = raceDate && startDate
-    ? Math.max(2, Math.ceil(daysBetween(startDate, raceDate) / 7))
+  // Weeks always run Mon→Sun. Week 1 starts on the Monday on/before startDate.
+  // Last week = the week containing raceDate. This is the ONLY way calendar dates align.
+  function getMondayOf(dateStr) {
+    const d = new Date(dateStr)
+    const dow = d.getDay()                   // 0=Sun, 1=Mon, ..., 6=Sat
+    const diff = (dow === 0) ? -6 : 1 - dow  // shift back to Monday
+    d.setDate(d.getDate() + diff)
+    return d
+  }
+  const planFirstMonday = startDate ? getMondayOf(startDate) : null
+  const raceMonday      = raceDate  ? getMondayOf(raceDate)  : null
+  const totalWeeks = (planFirstMonday && raceMonday)
+    ? Math.max(2, Math.round((raceMonday - planFirstMonday) / (7 * 24 * 60 * 60 * 1000)) + 1)
     : 16
+  // Pass the Monday-aligned start to buildPlan so all day indices map correctly
+  const alignedStartDate = planFirstMonday ? planFirstMonday.toISOString().split("T")[0] : startDate
 
   const goalKm       = race === "Custom" ? cKm : RACES[race]
   const cfg          = LEVELS[level]
@@ -770,7 +783,7 @@ export default function App() {
   const effectivePace  = mlPrediction ? mlPrediction.easyPace : pace
   const effectiveWkKm  = mlPrediction ? Math.max(wkKm, mlPrediction.weeklyLoad * 0.55) : wkKm
 
-  const plan  = buildPlan(effectiveWkKm, goalKm, totalWeeks, effectivePace, level, lRun, startDate, raceDate, restDays, race)
+  const plan  = buildPlan(effectiveWkKm, goalKm, totalWeeks, effectivePace, level, lRun, alignedStartDate, raceDate, restDays, race)
   const peak  = Math.max(...plan.map(w => w.totalKm))
   const chart = plan.map(w => ({ week: w.week, "Weekly Load": w.totalKm, "Long Run": w.longRun }))
 
@@ -882,7 +895,7 @@ export default function App() {
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 28 }}>
             <SecHead num="01" title="Goal-Aware Training Plan" sub="Science-backed plan with 4-week mesocycles and 10% weekly growth rule" color={acc} />
             <button
-              onClick={() => exportPlanToPDF(plan, athlete, race, goalTime, level, startDate, raceDate)}
+              onClick={() => exportPlanToPDF(plan, athlete, race, goalTime, level, alignedStartDate, raceDate)}
               style={{ display: "flex", alignItems: "center", gap: 8, background: `${acc}15`, border: `1px solid ${acc}40`, borderRadius: 10, padding: "10px 18px", cursor: "pointer", fontFamily: T.body, fontSize: 14, fontWeight: 600, color: acc }}>
               📄 Export PDF
             </button>
@@ -954,7 +967,7 @@ export default function App() {
                 />
                 {raceDate && startDate && (
                   <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>
-                    {daysBetween(startDate, raceDate)} days = {totalWeeks} weeks · Last 2 days auto-set to Warmup + Rest
+                    {totalWeeks} weeks to race · Plan starts {alignedStartDate !== startDate ? `Mon ${formatShortDate(new Date(alignedStartDate))}` : formatShortDate(new Date(startDate))} · Race day auto-set to Rest
                   </div>
                 )}
               </div>
