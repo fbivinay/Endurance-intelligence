@@ -88,13 +88,17 @@ function computeStatsFromRuns(runs) {
   const avgHr = hrs.length ? hrs.reduce((a, b) => a + b, 0) / hrs.length : null
   const totalKm = dists.reduce((a, b) => a + b, 0)
   const longestKm = Math.max(...dists)
-  // FIX 3: use actual date range (first→last run) for weekly estimate, not run count
-  // This correctly handles runners who run 6-7x/week vs 3x/week
+  // Weekly km: take the more generous of two estimates
+  // Method A: assume 4 runs/week (original, underestimates high-freq runners)
+  // Method B: date span (underestimates if runs fetched over long period)
+  // Taking max gives the fairest classification
   let weeklyKm
   if (runs.length >= 2) {
-    const dates = runs.map(r => new Date(r.date)).sort((a, b) => a - b)
+    const dates = runs.map(r => parseLocalDate(r.date)).sort((a, b) => a - b)
     const spanDays = Math.max(7, (dates[dates.length-1] - dates[0]) / (1000*60*60*24))
-    weeklyKm = totalKm / (spanDays / 7)
+    const bySpan = totalKm / (spanDays / 7)
+    const byCount = totalKm / Math.max(runs.length / 4, 1)
+    weeklyKm = Math.max(bySpan, byCount)
   } else {
     weeklyKm = totalKm
   }
@@ -108,18 +112,14 @@ function computeStatsFromRuns(runs) {
 // ─────────────────────────────────────────────────────────────────────────────
 // DATE HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX 8: Always parse YYYY-MM-DD strings as LOCAL time (not UTC).
-// new Date("2026-07-26") parses as UTC midnight → in IST (UTC+5:30) shows Jul 25!
-// Appending T00:00:00 forces the browser to parse in LOCAL timezone.
+// Parse YYYY-MM-DD as local time (not UTC) — prevents off-by-one in IST timezone
 function parseLocalDate(str) {
   if (!str) return null
-  if (str instanceof Date) return new Date(str.getTime())  // clone a Date object safely
-  if (typeof str === "string" && !str.includes("T")) return new Date(str + "T00:00:00")
-  return new Date(str)
+  if (str instanceof Date) return new Date(str.valueOf())
+  return new Date(str.replace(/-/g, "/"))  // "2026-07-26" → "2026/07/26" → local time
 }
-function addDays(dateInput, days) {
-  // Always work with a fresh Date to avoid mutating the original
-  const d = new Date(dateInput instanceof Date ? dateInput.getTime() : parseLocalDate(dateInput).getTime())
+function addDays(base, days) {
+  const d = new Date(base.valueOf())
   d.setDate(d.getDate() + days)
   return d
 }
@@ -135,11 +135,11 @@ function daysBetween(d1, d2) {
 function todayStr() {
   return new Date().toISOString().split("T")[0]
 }
-// FIX 1: getMondayOf at module level (not inside render)
+// getMondayOf: returns the Monday on or before a given date string
 function getMondayOf(dateStr) {
   const d = parseLocalDate(dateStr)
   const dow = d.getDay()                   // 0=Sun, 1=Mon, ..., 6=Sat
-  const diff = (dow === 0) ? -6 : 1 - dow  // shift back to Monday
+  const diff = (dow === 0) ? -6 : 1 - dow  // Mon=0 diff, Sun=-6 diff
   d.setDate(d.getDate() + diff)
   return d
 }
@@ -941,7 +941,7 @@ export default function App() {
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 28 }}>
             <SecHead num="01" title="Goal-Aware Training Plan" sub="Science-backed plan with 4-week mesocycles and 10% weekly growth rule" color={acc} />
             <button
-              onClick={() => exportPlanToPDF(plan, athlete, race, goalTime, level, alignedStartDate, raceDate)}
+              onClick={() => exportPlanToPDF(plan, athlete, race, goalTime, level, startDate, raceDate)}
               style={{ display: "flex", alignItems: "center", gap: 8, background: `${acc}15`, border: `1px solid ${acc}40`, borderRadius: 10, padding: "10px 18px", cursor: "pointer", fontFamily: T.body, fontSize: 14, fontWeight: 600, color: acc }}>
               📄 Export PDF
             </button>
@@ -1013,7 +1013,7 @@ export default function App() {
                 />
                 {raceDate && startDate && (
                   <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>
-                    {totalWeeks} weeks to race · Plan starts {alignedStartDate !== startDate ? `Mon ${formatShortDate(parseLocalDate(alignedStartDate))}` : formatShortDate(parseLocalDate(startDate))} · Race day auto-set to Rest
+                    {totalWeeks} weeks to race · Start: {formatShortDate(parseLocalDate(startDate))} · Race day auto-set to Rest
                   </div>
                 )}
               </div>
