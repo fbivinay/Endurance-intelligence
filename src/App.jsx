@@ -492,7 +492,7 @@ export default function App() {
             </div>
             <div style={{ display:"flex", gap:16, flexWrap:"wrap" }}>
               {[
-                ["Avg Pace",    `${stats.avgPaceMin}`, "min/km"],
+                ["Avg Pace",    paceToDisplay(stats.avgPaceMin), "min/km"],
                 ["Avg HR",      stats.avgHr ? `${stats.avgHr}` : "N/A", "bpm"],
                 ["Total Logged",`${stats.totalKm}`, "km"],
                 ["Longest Run", `${stats.longestKm}`, "km"],
