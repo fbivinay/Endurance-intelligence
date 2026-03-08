@@ -88,20 +88,7 @@ function computeStatsFromRuns(runs) {
   const avgHr = hrs.length ? hrs.reduce((a, b) => a + b, 0) / hrs.length : null
   const totalKm = dists.reduce((a, b) => a + b, 0)
   const longestKm = Math.max(...dists)
-  // Weekly km: take the more generous of two estimates
-  // Method A: assume 4 runs/week (original, underestimates high-freq runners)
-  // Method B: date span (underestimates if runs fetched over long period)
-  // Taking max gives the fairest classification
-  let weeklyKm
-  if (runs.length >= 2) {
-    const dates = runs.map(r => parseLocalDate(r.date)).sort((a, b) => a - b)
-    const spanDays = Math.max(7, (dates[dates.length-1] - dates[0]) / (1000*60*60*24))
-    const bySpan = totalKm / (spanDays / 7)
-    const byCount = totalKm / Math.max(runs.length / 4, 1)
-    weeklyKm = Math.max(bySpan, byCount)
-  } else {
-    weeklyKm = totalKm
-  }
+  const weeklyKm = totalKm / Math.max(runs.length / 4, 1)
   return {
     avgPaceMin: +avgPace.toFixed(2), avgHr: avgHr ? +avgHr.toFixed(0) : null,
     totalKm: +totalKm.toFixed(1), longestKm: +longestKm.toFixed(1),
@@ -112,16 +99,8 @@ function computeStatsFromRuns(runs) {
 // ─────────────────────────────────────────────────────────────────────────────
 // DATE HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-// Parse YYYY-MM-DD as local time (not UTC) — prevents off-by-one in IST timezone
-function parseLocalDate(str) {
-  if (!str) return null
-  if (str instanceof Date) return new Date(str.valueOf())
-  return new Date(str.replace(/-/g, "/"))  // "2026-07-26" → "2026/07/26" → local time
-}
-function addDays(base, days) {
-  const d = new Date(base.valueOf())
-  d.setDate(d.getDate() + days)
-  return d
+function addDays(date, days) {
+  const d = new Date(date); d.setDate(d.getDate() + days); return d
 }
 function formatDate(date) {
   return date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
@@ -135,15 +114,6 @@ function daysBetween(d1, d2) {
 function todayStr() {
   return new Date().toISOString().split("T")[0]
 }
-// getMondayOf: returns the Monday on or before a given date string
-function getMondayOf(dateStr) {
-  const d = parseLocalDate(dateStr)
-  const dow = d.getDay()                   // 0=Sun, 1=Mon, ..., 6=Sat
-  const diff = (dow === 0) ? -6 : 1 - dow  // Mon=0 diff, Sun=-6 diff
-  d.setDate(d.getDate() + diff)
-  return d
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // PACE HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -224,33 +194,17 @@ function mlPredictTraining(goalTimeMinutes, raceKm, currentWeeklyKm, longestRun)
 const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 function buildWeekPattern(restCount, weekSessions) {
-  // Sunday (idx 6) = always Long Run (30% of weekly volume)
+  // Sunday (idx 6) = always Long Run
   // Sat   (idx 5) = always Rest
-  // Remaining 70% distributed across run days, normalised to sum exactly to 1.0
   const extraRest = restCount === 1 ? [] : restCount === 2 ? [2] : [1, 3]
   const restPositions = [5, ...extraRest]
 
-  // Raw fractions per session type (relative weights)
-  const rawFrac = s => s === "Easy" ? 2.2 : s === "Tempo" ? 1.8 : s === "Intervals" ? 1.4 : s === "Recovery" ? 1.0 : 1.8
-
-  // Collect which weekday slots are run days (not rest, not Sunday)
-  const runDaySlots = []
-  for (let i = 0; i < 6; i++) {
-    if (!restPositions.includes(i)) runDaySlots.push(i)
-  }
-  // Assign sessions to run day slots
-  const sessAssigned = runDaySlots.map((_, si) => weekSessions[si % weekSessions.length])
-  // Normalise: weekday run days get 70% of total, Long Run (Sun) gets 30%
-  const rawTotal = sessAssigned.reduce((sum, s) => sum + rawFrac(s), 0)
-  const normFracs = sessAssigned.map(s => +(rawFrac(s) / rawTotal * 0.70).toFixed(4))
-
-  let runIdx = 0
+  let si = 0
   return Array.from({ length: 7 }, (_, i) => {
     if (i === 6) return ["Long", 0.30]
     if (restPositions.includes(i)) return ["Rest", 0]
-    const sess = sessAssigned[runIdx]
-    const frac = normFracs[runIdx]
-    runIdx++
+    const sess = weekSessions[si % weekSessions.length]; si++
+    const frac = sess === "Easy" ? 0.22 : sess === "Tempo" ? 0.18 : sess === "Intervals" ? 0.14 : sess === "Recovery" ? 0.10 : 0.18
     return [sess, frac]
   })
 }
@@ -272,7 +226,7 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
     6: ["Easy", "Tempo", "Easy", "Intervals", "Recovery", "Easy"],
   }
   const weekSessions = sessionPool[Math.min(6, Math.max(4, runCount))] || sessionPool[5]
-  const base = startDate ? parseLocalDate(startDate) : null
+  const base = startDate ? new Date(startDate) : null
 
   let wk = weeklyKm
   let lr = longRun
@@ -307,8 +261,8 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
 
     const days = pat.map(([sess, frac], di) => {
       const date = weekStart ? addDays(weekStart, di) : null
-      const isRaceDay = raceDate && date && date.toISOString().split("T")[0] === raceDate
-      const isDayBeforeRace = raceDate && date && addDays(date, 1).toISOString().split("T")[0] === raceDate
+      const isRaceDay = raceDate && date && date.toDateString() === new Date(raceDate).toDateString()
+      const isDayBeforeRace = raceDate && date && addDays(date, 1).toDateString() === new Date(raceDate).toDateString()
 
       let finalSess = sess
       let km = frac > 0 ? +(wk * frac).toFixed(1) : 0
@@ -336,14 +290,8 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
       }
     })
 
-    // FIX 6: if this week's Sunday is the race day, long run = 0 (race replaces it)
-    const weekSunday = weekStart ? addDays(weekStart, 6) : null
-    const isRaceOnSunday = weekSunday && raceDate &&
-      weekSunday.toISOString().split("T")[0] === raceDate
-    const displayLongRun = isRaceOnSunday ? 0 : +lr.toFixed(1)
-
     return {
-      week: n, totalKm: +wk.toFixed(1), longRun: displayLongRun,
+      week: n, totalKm: +wk.toFixed(1), longRun: +lr.toFixed(1),
       taper, isRecoveryWeek, days,
       dateRange: weekStart ? `${formatDate(weekStart)} - ${formatDate(weekEnd)}` : null,
     }
@@ -402,8 +350,8 @@ function exportPlanToPDF(plan, athlete, race, goalTime, level, startDate, raceDa
   }).join("")
 
   // Fix #6: start date in header; Fix #3: race date in header; Fix #2: goal time labelled
-  const startDateFmt = startDate ? parseLocalDate(startDate).toLocaleDateString("en-GB", {day:"2-digit",month:"short",year:"numeric"}) : "Not set"
-  const raceDateFmt  = raceDate  ? parseLocalDate(raceDate).toLocaleDateString("en-GB",  {day:"2-digit",month:"short",year:"numeric"}) : "Not set"
+  const startDateFmt = startDate ? new Date(startDate).toLocaleDateString("en-GB", {day:"2-digit",month:"short",year:"numeric"}) : "Not set"
+  const raceDateFmt  = raceDate  ? new Date(raceDate).toLocaleDateString("en-GB",  {day:"2-digit",month:"short",year:"numeric"}) : "Not set"
   const goalTimeFmt  = formatGoalTimeForPDF(goalTime, raceKm)
 
   win.document.write(`
@@ -576,7 +524,7 @@ function RaceCountdown({ raceDate, race, accent }) {
         ))}
       </div>
       <div style={{ fontFamily: T.body, fontSize: 13, color: T.textSub }}>
-        Race: {parseLocalDate(raceDate).toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}
+        Race: {new Date(raceDate).toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}
       </div>
     </div>
   )
@@ -795,7 +743,15 @@ export default function App() {
   }
 
   // ── DERIVED VALUES ──────────────────────────────────────────────────────────
-  // Weeks always run Mon→Sun. getMondayOf is defined at module level above.
+  // Weeks always run Mon→Sun. Week 1 starts on the Monday on/before startDate.
+  // Last week = the week containing raceDate. This is the ONLY way calendar dates align.
+  function getMondayOf(dateStr) {
+    const d = new Date(dateStr)
+    const dow = d.getDay()                   // 0=Sun, 1=Mon, ..., 6=Sat
+    const diff = (dow === 0) ? -6 : 1 - dow  // shift back to Monday
+    d.setDate(d.getDate() + diff)
+    return d
+  }
   const planFirstMonday = startDate ? getMondayOf(startDate) : null
   const raceMonday      = raceDate  ? getMondayOf(raceDate)  : null
   const totalWeeks = (planFirstMonday && raceMonday)
@@ -1013,7 +969,7 @@ export default function App() {
                 />
                 {raceDate && startDate && (
                   <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>
-                    {totalWeeks} weeks to race · Start: {formatShortDate(parseLocalDate(startDate))} · Race day auto-set to Rest
+                    {totalWeeks} weeks to race · Plan starts {alignedStartDate !== startDate ? `Mon ${formatShortDate(new Date(alignedStartDate))}` : formatShortDate(new Date(startDate))} · Race day auto-set to Rest
                   </div>
                 )}
               </div>
