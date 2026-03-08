@@ -255,7 +255,6 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
 
     // Original model: wk grows +10% each build week, -20% recovery, -30% taper
     // lr grows +1.2km/week on build weeks, holds on recovery, drops hard on taper
-    const cycleWeek = n % 4
     if (taper) {
       wk = Math.round(wk * 0.70 * 10) / 10
       lr = Math.round(lr * 0.60 * 10) / 10
