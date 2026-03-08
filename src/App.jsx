@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect } from "react"
 import {
   Area, AreaChart, ComposedChart, CartesianGrid,
   XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, ReferenceLine
@@ -125,7 +125,9 @@ function paceToDisplay(decimalPace) {
   return `${mins}:${String(secs).padStart(2, "0")}`
 }
 function paceRangeDisplay(low, high) {
-  return `${paceToDisplay(Math.max(3, low))}-${paceToDisplay(Math.min(15, high))}`
+  // No artificial floor — elite intervals can be sub-3:00/km
+  // Only enforce absolute physical limits: faster than 2:00/km or slower than 15:00/km is impossible
+  return `${paceToDisplay(Math.max(2.0, low))}-${paceToDisplay(Math.min(15, high))}`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -210,15 +212,14 @@ function buildWeekPattern(restCount, weekSessions) {
 }
 
 function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate, raceDate, restDays, raceName) {
-  const cfg = LEVELS[level]
-
-  // Science-backed peak: use RACE_PEAK_KM table, clamped so we never exceed 10%/week growth
+  // Science-backed peak: use RACE_PEAK_KM table, clamped by 10%/week compounding from start
   const tablePeak = (RACE_PEAK_KM[raceName] || RACE_PEAK_KM["Custom"])[level]
-  const maxGrowthPeak = weeklyKm * Math.pow(1.10, totalWeeks - 2) // 10%/week compounded
+  const maxGrowthPeak = weeklyKm * Math.pow(1.10, totalWeeks - 2)
   const peak = Math.min(tablePeak, maxGrowthPeak)
 
-  // 10% rule: never grow more than 10% per week
-  const maxWeeklyGrowth = weeklyKm * 0.10
+  // Long run absolute cap: no training run exceeds 38km regardless of race distance
+  // (Sports science: beyond 38km, injury risk outweighs benefit for non-elite)
+  const longRunCap = Math.min(goalKm * 0.95, 38)
 
   const runCount = 7 - restDays
   const sessionPool = {
@@ -244,12 +245,13 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
       wk = Math.round(wk * 0.70 * 10) / 10
       lr = Math.round(lr * 0.60 * 10) / 10
     } else if (cycleWeek === 0) {
-      // Recovery week (every 4th week)
+      // Recovery week — drop 20%, long run holds
       wk = Math.round(wk * 0.80 * 10) / 10
     } else {
-      // Build week — max 10% increase
-      wk = Math.min(peak, Math.round((wk + maxWeeklyGrowth) * 10) / 10)
-      lr = Math.min(goalKm * 0.95, Math.round((lr + 1.2) * 10) / 10)
+      // FIX #1: recalculate 10% of CURRENT wk each week, not fixed from start
+      const weeklyGrowth = wk * 0.10
+      wk = Math.min(peak, Math.round((wk + weeklyGrowth) * 10) / 10)
+      lr = Math.min(longRunCap, Math.round((lr + 1.2) * 10) / 10)
     }
 
     const isRecoveryWeek = !taper && cycleWeek === 0 && n < totalWeeks - 1
@@ -298,62 +300,121 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PDF EXPORT
+// PDF EXPORT — all issues fixed
 // ─────────────────────────────────────────────────────────────────────────────
-function exportPlanToPDF(plan, athlete, race, goalTime, level) {
+function formatGoalTimeForPDF(goalTime, raceKm) {
+  // Fix #2: make goal time unambiguous — show as H:MM:SS for long races
+  if (!goalTime) return "Not set"
+  const parts = goalTime.split(":").map(Number)
+  if (parts.length === 2) {
+    const totalMins = parts[0] * 60 + parts[1]
+    const impliedPace = raceKm ? totalMins / raceKm : 0
+    // If implied pace is reasonable as a finish time (> 3 min/km implied pace for race)
+    // Display as finish time clearly
+    if (raceKm && raceKm >= 10) {
+      // Long race: format as hours:mins finish time
+      return `${parts[0]}h ${String(parts[1]).padStart(2,"0")}min (finish time)`
+    }
+    return goalTime
+  }
+  return goalTime
+}
+
+function exportPlanToPDF(plan, athlete, race, goalTime, level, startDate, raceDate) {
   const cfg = LEVELS[level]
+  const raceKm = RACES[race] || 0
   const win = window.open("", "_blank")
-  const rows = plan.map(w => `
-    <tr style="background:${w.taper?"#e8f4fd":w.isRecoveryWeek?"#fff8e7":"#fff"}">
-      <td style="padding:8px;border:1px solid #ddd;font-weight:700">Week ${w.week}${w.taper?" 🏁":w.isRecoveryWeek?" 🔄":""}</td>
-      <td style="padding:8px;border:1px solid #ddd">${w.dateRange || "-"}</td>
-      <td style="padding:8px;border:1px solid #ddd;font-weight:700">${w.totalKm} km</td>
-      <td style="padding:8px;border:1px solid #ddd">${w.longRun} km</td>
-      <td style="padding:8px;border:1px solid #ddd">${w.days.map(d=>`${d.day}: ${d.sess}${d.km>0?" ("+d.km+"km)":""}`).join(" | ")}</td>
-    </tr>
-  `).join("")
+  if (!win) { alert("Please allow popups to export PDF"); return }
+
+  // Fix #4 & #10: each day on its own line, not pipes
+  // Fix #5: include pace per session
+  const rows = plan.map(w => {
+    const sessLines = w.days
+      .map(d => {
+        if (d.sess === "Rest") return `<span style="color:#999">${d.date ? d.date+" " : ""}${d.day}: Rest</span>`
+        const paceNote = d.pace && d.pace !== "--" ? ` @ ${d.pace} /km` : ""
+        const kmNote = d.km > 0 ? ` · ${d.km}km` : ""
+        const raceTag = d.isRace ? " 🏁 RACE DAY" : ""
+        return `<span style="color:${d.sess==="Easy"?"#2d6a2d":d.sess==="Tempo"?"#7a5c00":d.sess==="Long"?"#8b2500":d.sess==="Intervals"?"#4a0080":d.sess==="Recovery"?"#004080":"#555"};font-weight:${d.isRace?"700":"400"}">${d.date ? d.date+" " : ""}${d.day}: <strong>${d.sess}</strong>${kmNote}${paceNote}${raceTag}</span>`
+      })
+      .join("<br>")
+    return `
+      <tr style="background:${w.taper?"#e8f4fd":w.isRecoveryWeek?"#fff8e7":"#fff"};page-break-inside:avoid">
+        <td style="padding:10px 8px;border:1px solid #ddd;font-weight:700;white-space:nowrap;vertical-align:top">
+          Week ${w.week}${w.taper?" 🏁":w.isRecoveryWeek?" 🔄":""}
+        </td>
+        <td style="padding:10px 8px;border:1px solid #ddd;white-space:nowrap;vertical-align:top;font-size:12px">${w.dateRange || "-"}</td>
+        <td style="padding:10px 8px;border:1px solid #ddd;font-weight:700;white-space:nowrap;vertical-align:top">${w.totalKm} km</td>
+        <td style="padding:10px 8px;border:1px solid #ddd;white-space:nowrap;vertical-align:top">${w.longRun} km</td>
+        <td style="padding:10px 8px;border:1px solid #ddd;font-size:12px;line-height:1.8;vertical-align:top">${sessLines}</td>
+      </tr>`
+  }).join("")
+
+  // Fix #6: start date in header; Fix #3: race date in header; Fix #2: goal time labelled
+  const startDateFmt = startDate ? new Date(startDate).toLocaleDateString("en-GB", {day:"2-digit",month:"short",year:"numeric"}) : "Not set"
+  const raceDateFmt  = raceDate  ? new Date(raceDate).toLocaleDateString("en-GB",  {day:"2-digit",month:"short",year:"numeric"}) : "Not set"
+  const goalTimeFmt  = formatGoalTimeForPDF(goalTime, raceKm)
 
   win.document.write(`
     <!DOCTYPE html><html><head>
+    <meta charset="utf-8">
     <title>Endurance Intelligence — Training Plan</title>
     <style>
-      body{font-family:Arial,sans-serif;padding:32px;color:#1a1a1a}
-      h1{color:#e3b341;margin-bottom:4px}
-      h2{color:#444;font-size:16px;margin-bottom:24px;font-weight:400}
-      table{width:100%;border-collapse:collapse;font-size:13px}
-      th{background:#1a1a2e;color:#fff;padding:10px 8px;border:1px solid #ddd;text-align:left}
-      .meta{display:flex;gap:24px;margin-bottom:24px;padding:16px;background:#f8f9fa;border-radius:8px;flex-wrap:wrap}
-      .meta-item{display:flex;flex-direction:column}
-      .meta-label{font-size:11px;color:#888;text-transform:uppercase}
-      .meta-value{font-size:18px;font-weight:700;color:#1a1a2e}
-      .legend{display:flex;gap:16px;margin:16px 0;font-size:12px;flex-wrap:wrap}
-      .leg{padding:4px 10px;border-radius:4px}
+      @media print {
+        body { margin: 0; padding: 20px; }
+        .no-print { display: none; }
+        tr { page-break-inside: avoid; }
+      }
+      body { font-family: Arial, sans-serif; padding: 32px; color: #1a1a1a; font-size: 13px; }
+      h1 { color: #e3b341; margin: 0 0 4px; font-size: 28px; letter-spacing: 2px; }
+      h2 { color: #444; font-size: 15px; margin: 0 0 20px; font-weight: 400; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      th { background: #1a1a2e; color: #fff; padding: 10px 8px; border: 1px solid #ddd; text-align: left; }
+      .meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; padding: 16px; background: #f8f9fa; border-radius: 8px; }
+      .meta-item { display: flex; flex-direction: column; gap: 3px; }
+      .meta-label { font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+      .meta-value { font-size: 16px; font-weight: 700; color: #1a1a2e; }
+      /* Fix #11: legend BEFORE table */
+      .legend { display: flex; gap: 12px; margin: 0 0 12px; font-size: 11px; flex-wrap: wrap; }
+      .leg { padding: 3px 10px; border-radius: 4px; }
+      .btn { display: inline-block; margin-bottom: 16px; padding: 8px 20px; background: #1a1a2e; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
     </style>
     </head><body>
     <h1>ENDURANCE INTELLIGENCE</h1>
-    <h2>Training Plan for ${athlete?.firstname || "Athlete"} ${athlete?.lastname || ""}</h2>
+    <h2>Training Plan — ${athlete?.firstname || "Athlete"} ${athlete?.lastname || ""}</h2>
+
     <div class="meta">
       <div class="meta-item"><span class="meta-label">Race</span><span class="meta-value">${race}</span></div>
-      <div class="meta-item"><span class="meta-label">Goal Time</span><span class="meta-value">${goalTime || "Not set"}</span></div>
+      <div class="meta-item"><span class="meta-label">Race Date</span><span class="meta-value" style="color:${raceDate?"#c0392b":"#888"}">${raceDateFmt}</span></div>
+      <div class="meta-item"><span class="meta-label">Start Date</span><span class="meta-value">${startDateFmt}</span></div>
+      <div class="meta-item"><span class="meta-label">Goal Time</span><span class="meta-value">${goalTimeFmt}</span></div>
       <div class="meta-item"><span class="meta-label">Level</span><span class="meta-value">${cfg.icon} ${level}</span></div>
       <div class="meta-item"><span class="meta-label">Total Weeks</span><span class="meta-value">${plan.length}</span></div>
       <div class="meta-item"><span class="meta-label">Generated</span><span class="meta-value">${new Date().toLocaleDateString("en-GB")}</span></div>
     </div>
+
     <div class="legend">
       <span class="leg" style="background:#e8f4fd">🏁 Taper week</span>
       <span class="leg" style="background:#fff8e7">🔄 Recovery week (4-week mesocycle)</span>
+      <span style="font-size:11px;color:#888">· Sessions include pace targets in min:sec/km</span>
     </div>
+
     <table>
       <thead><tr>
-        <th>Week</th><th>Dates</th><th>Total km</th><th>Long Run</th><th>Sessions</th>
+        <th style="width:80px">Week</th>
+        <th style="width:130px">Dates</th>
+        <th style="width:75px">Total km</th>
+        <th style="width:70px">Long Run</th>
+        <th>Daily Sessions (distance · pace)</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p style="margin-top:24px;font-size:11px;color:#888">
+
+    <p style="margin-top:20px;font-size:10px;color:#888;border-top:1px solid #eee;padding-top:12px">
       Generated by Endurance Intelligence · MSc Big Data Analytics · SJU Bangalore<br>
-      Model trained on 42,116 Strava runs · Methodology: Random Forest + Daniels Running Formula
+      Model trained on 42,116 Strava runs · Methodology: Random Forest + Daniels Running Formula · 10% weekly growth rule enforced
     </p>
-    <script>window.onload=()=>window.print()</script>
+    <script>window.onload = () => window.print()</script>
     </body></html>
   `)
   win.document.close()
@@ -821,7 +882,7 @@ export default function App() {
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 28 }}>
             <SecHead num="01" title="Goal-Aware Training Plan" sub="Science-backed plan with 4-week mesocycles and 10% weekly growth rule" color={acc} />
             <button
-              onClick={() => exportPlanToPDF(plan, athlete, race, goalTime, level)}
+              onClick={() => exportPlanToPDF(plan, athlete, race, goalTime, level, startDate, raceDate)}
               style={{ display: "flex", alignItems: "center", gap: 8, background: `${acc}15`, border: `1px solid ${acc}40`, borderRadius: 10, padding: "10px 18px", cursor: "pointer", fontFamily: T.body, fontSize: 14, fontWeight: 600, color: acc }}>
               📄 Export PDF
             </button>
