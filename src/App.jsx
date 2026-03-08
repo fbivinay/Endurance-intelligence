@@ -108,16 +108,20 @@ function computeStatsFromRuns(runs) {
 // ─────────────────────────────────────────────────────────────────────────────
 // DATE HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX 8: Always parse YYYY-MM-DD date strings as LOCAL time, not UTC.
-// new Date("2026-07-26") parses as UTC midnight → in IST shows as Jul 25!
-// new Date("2026-07-26T00:00:00") forces local timezone parse.
+// FIX 8: Always parse YYYY-MM-DD strings as LOCAL time (not UTC).
+// new Date("2026-07-26") parses as UTC midnight → in IST (UTC+5:30) shows Jul 25!
+// Appending T00:00:00 forces the browser to parse in LOCAL timezone.
 function parseLocalDate(str) {
   if (!str) return null
-  if (str instanceof Date) return str
-  return new Date(str.includes("T") ? str : str + "T00:00:00")
+  if (str instanceof Date) return new Date(str.getTime())  // clone a Date object safely
+  if (typeof str === "string" && !str.includes("T")) return new Date(str + "T00:00:00")
+  return new Date(str)
 }
-function addDays(date, days) {
-  const d = parseLocalDate(date); d.setDate(d.getDate() + days); return d
+function addDays(dateInput, days) {
+  // Always work with a fresh Date to avoid mutating the original
+  const d = new Date(dateInput instanceof Date ? dateInput.getTime() : parseLocalDate(dateInput).getTime())
+  d.setDate(d.getDate() + days)
+  return d
 }
 function formatDate(date) {
   return date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
