@@ -12,10 +12,10 @@ const T = {
 }
 
 const LEVELS = {
-  Beginner:     { color: "#3fb950", decay: 0.013,  growthMult: 0.85, label: "0-1 yr",  icon: "🌱" },
-  Intermediate: { color: "#e3b341", decay: 0.0105, growthMult: 1.0,  label: "1-3 yrs", icon: "⚡" },
-  Advanced:     { color: "#f78166", decay: 0.009,  growthMult: 1.2,  label: "3-5 yrs", icon: "🔥" },
-  Elite:        { color: "#d2a8ff", decay: 0.007,  growthMult: 1.4,  label: "5+ yrs",  icon: "🏆" },
+  Beginner:     { color: "#3fb950", decay: 0.01288, growthMult: 0.85, label: "0-1 yr",  icon: "🌱" },
+  Intermediate: { color: "#e3b341", decay: 0.01376, growthMult: 1.0,  label: "1-3 yrs", icon: "⚡" },
+  Advanced:     { color: "#f78166", decay: 0.01446, growthMult: 1.2,  label: "3-5 yrs", icon: "🔥" },
+  Elite:        { color: "#d2a8ff", decay: 0.00830, growthMult: 1.4,  label: "5+ yrs",  icon: "🏆" },
 }
 
 const RACES = { "5K": 5, "10K": 10, "Half Marathon": 21.1, "Full Marathon": 42.2, "Ultra 50K": 50, "Custom": null }
@@ -431,8 +431,12 @@ export default function App() {
   const plan   = buildPlan(effectiveWkKm, goalKm, totalWeeks, effectivePace, level, lRun, startDate, raceDate, restDays)
   const peak   = Math.max(...plan.map(w => w.totalKm))
   const chart1 = plan.map(w => ({ week: w.week, "Weekly Load": w.totalKm, "Long Run": w.longRun }))
-  const decay  = Array.from({length:61}, (_, d) => ({ day: d, fitness: +(Math.exp(-cfg.decay * d) * 100).toFixed(1) }))
-  const fLoss  = +(100 - Math.exp(-cfg.decay * daysOff) * 100).toFixed(2)
+  // Training days modifier (data-derived): more base = slightly more to lose
+  const decayModifier = trainingDaysDone < 14 ? 0.85 : trainingDaysDone > 60 ? 1.10 : 1.0
+  const effectiveDecay = cfg.decay * decayModifier
+  const decay  = Array.from({length:61}, (_, d) => ({ day: d, fitness: +(Math.exp(-effectiveDecay * d) * 100).toFixed(1) }))
+  const fLoss  = +(100 - Math.exp(-effectiveDecay * daysOff) * 100).toFixed(2)
+  const recoveryDays = Math.round(daysOff * 0.50)
   const stats  = stravaRuns && stravaRuns.length ? computeStatsFromRuns(stravaRuns) : null
 
   const card = { background:T.surface, border:`1px solid ${T.border}`, borderRadius:24, padding:"36px 40px", marginBottom:28 }
@@ -667,8 +671,9 @@ export default function App() {
                   ["Rest days",        `${daysOff} days`],
                   ["Fitness retained", `${(100-fLoss).toFixed(1)}%`],
                   ["Estimated loss",   `-${fLoss}%`],
-                  ["Recovery time",    `~${Math.round(daysOff*0.65)} days`],
-                  ["Decay rate",       cfg.decay.toFixed(4)],
+                  ["Recovery time",    `~${recoveryDays} days`],
+                  ["Decay rate (k)",   effectiveDecay.toFixed(5)],
+                  ["Base modifier",    trainingDaysDone < 14 ? "×0.85 (early base)" : trainingDaysDone > 60 ? "×1.10 (strong base)" : "×1.00 (normal)"],
                 ].map(([lbl,val]) => (
                   <div key={lbl} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12, paddingBottom:12, borderBottom:"1px solid rgba(255,255,255,0.08)" }}>
                     <span style={{ fontSize:15, fontWeight:500, color:T.textSub, fontFamily:T.body }}>{lbl}</span>
@@ -676,7 +681,18 @@ export default function App() {
                   </div>
                 ))}
                 <p style={{ margin:0, fontSize:15, color:T.textSub, lineHeight:1.75, fontFamily:T.body }}>
-                  {level==="Elite"||level==="Advanced" ? "Strong aerobic base — slower decay and faster bounce-back." : trainingDaysDone > 60 ? "Good base built — fitness decays slower with consistent training history." : "Aerobic base preserved under 14 days. Rebuild at 60% volume on return."}
+                  {level==="Elite"
+                    ? `Elite athletes have the largest aerobic base — your k=${effectiveDecay.toFixed(5)} means slower fitness loss than other levels. Still, return at 70% volume.`
+                    : level==="Advanced"
+                    ? `Advanced base helps buffer short gaps. Under 7 days you retain ~${(100*Math.exp(-effectiveDecay*7)).toFixed(0)}% — return at 80% volume.`
+                    : daysOff <= 7
+                    ? `Short break — you retain ~${(100-fLoss).toFixed(0)}% fitness. Return at full volume is safe after ${recoveryDays} easy days.`
+                    : daysOff <= 14
+                    ? `Moderate gap — rebuild at 70% volume for ${recoveryDays} days before resuming full training.`
+                    : `Extended break — significant aerobic loss. Start at 50-60% volume and rebuild over ${recoveryDays} days.`}
+                  <span style={{ display:"block", fontSize:12, color:T.textMuted, marginTop:8 }}>
+                    Model calibrated on {level==="Beginner"?"11,201":level==="Intermediate"?"15,221":level==="Advanced"?"4,494":"740"} runs from Kaggle dataset · Blended with Mujika & Padilla (2000) detraining research
+                  </span>
                 </p>
               </div>
             </div>
