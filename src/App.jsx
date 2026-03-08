@@ -240,7 +240,12 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
   const base = startDate ? new Date(startDate) : null
 
   let wk = weeklyKm
-  let lr = longRun
+  // Long run must not dominate weekly volume. Cap at 35% of weekly km at plan start.
+  // This ensures other sessions always have meaningful distance (e.g. Easy 5-8km, not 0.9km).
+  // The lr then grows +1.2km/week toward the longRunCap (38km) independently.
+  // Example: if user runs 24km/week with a 22km long run, we reset lr to 8.4km (35% of 24)
+  // and it builds properly. Their actual fitness is captured by weeklyKm, not lr ratio.
+  let lr = Math.min(longRun, wk * 0.35)
 
   return Array.from({ length: totalWeeks }, (_, i) => {
     const n = i + 1
