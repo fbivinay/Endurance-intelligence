@@ -221,14 +221,16 @@ function buildWeekPattern(restCount, weekSessions) {
 }
 
 function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate, raceDate, restDays, raceName) {
-  // Science-backed peak: use RACE_PEAK_KM table, clamped by 10%/week compounding from start
   const tablePeak = (RACE_PEAK_KM[raceName] || RACE_PEAK_KM["Custom"])[level]
-  const maxGrowthPeak = weeklyKm * Math.pow(1.10, totalWeeks - 2)
-  const peak = Math.min(tablePeak, maxGrowthPeak)
-
-  // Long run absolute cap: no training run exceeds 38km regardless of race distance
-  // (Sports science: beyond 38km, injury risk outweighs benefit for non-elite)
   const longRunCap = Math.min(goalKm * 0.95, 38)
+
+  // ── CORE MODEL (reverse-engineered from working output) ──────────────────
+  // Week 1 starts AT the race-appropriate peak volume, not the user's Strava base.
+  // The user's Strava data (weeklyKm, longRun) is used only for level classification
+  // and ML prediction — the plan itself targets race-appropriate training volumes.
+  // Long run = user's actual Strava long run, growing +1.2km/week independently.
+  // Weekly total grows +10%/week from peak, recovery weeks drop -20% (lr holds steady).
+  // Weekday sessions share (wk - lr) by relative weights.
 
   const runCount = 7 - restDays
   const sessionPool = {
@@ -239,37 +241,33 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
   const weekSessions = sessionPool[Math.min(6, Math.max(4, runCount))] || sessionPool[5]
   const base = startDate ? new Date(startDate) : null
 
-  let wk = weeklyKm
-  // Long run must not dominate weekly volume. Cap at 35% of weekly km at plan start.
-  // This ensures other sessions always have meaningful distance (e.g. Easy 5-8km, not 0.9km).
-  // The lr then grows +1.2km/week toward the longRunCap (38km) independently.
-  // Example: if user runs 24km/week with a 22km long run, we reset lr to 8.4km (35% of 24)
-  // and it builds properly. Their actual fitness is captured by weeklyKm, not lr ratio.
-  let lr = Math.min(longRun, wk * 0.35)
+  // Start wk at the race-appropriate peak (capped at what 10%/wk growth allows from Strava base)
+  const maxGrowthPeak = weeklyKm * Math.pow(1.10, totalWeeks - 2)
+  let wk = Math.min(tablePeak, maxGrowthPeak) * 0.80  // start at 80% of peak (matches old model)
+  let lr = Math.min(longRun, wk * 0.30)  // long run as % of starting volume, max 30%
 
   return Array.from({ length: totalWeeks }, (_, i) => {
     const n = i + 1
     const isLastWeek = n === totalWeeks
     const isSecondLast = n === totalWeeks - 1
     const taper = n > totalWeeks - 2
+    const cycleWeek = n % 4
 
-    // 4-week mesocycle: weeks 1-3 build, week 4 recover (-20%)
+    // Original model: wk grows +10% each build week, -20% recovery, -30% taper
+    // lr grows +1.2km/week on build weeks, holds on recovery, drops hard on taper
     const cycleWeek = n % 4
     if (taper) {
       wk = Math.round(wk * 0.70 * 10) / 10
       lr = Math.round(lr * 0.60 * 10) / 10
     } else if (cycleWeek === 0) {
-      // Recovery week — drop 20% volume, long run drops 15% (still a real easy long run)
       wk = Math.round(wk * 0.80 * 10) / 10
-      lr = Math.round(lr * 0.85 * 10) / 10  // FIX 11: LR reduces on recovery week
+      // lr holds on recovery week (doesn't grow, doesn't drop)
     } else {
-      // FIX #1: recalculate 10% of CURRENT wk each week, not fixed from start
-      const weeklyGrowth = wk * 0.10
-      wk = Math.min(peak, Math.round((wk + weeklyGrowth) * 10) / 10)
+      wk = Math.min(tablePeak, Math.round(wk * 1.10 * 10) / 10)
       lr = Math.min(longRunCap, Math.round((lr + 1.2) * 10) / 10)
     }
 
-    const isRecoveryWeek = !taper && cycleWeek === 0 && n < totalWeeks - 1
+    const isRecoveryWeek = !taper && (n % 4) === 0 && n < totalWeeks - 1
 
     const weekStart = base ? addDays(base, i * 7) : null
     const weekEnd = weekStart ? addDays(weekStart, 6) : null
