@@ -194,17 +194,28 @@ function mlPredictTraining(goalTimeMinutes, raceKm, currentWeeklyKm, longestRun)
 const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 function buildWeekPattern(restCount, weekSessions) {
-  // Sunday (idx 6) = always Long Run
+  // Sunday (idx 6) = always Long Run (km set from lr variable directly)
   // Sat   (idx 5) = always Rest
+  // Other run days share the remaining (wk - lr) volume by relative weights
   const extraRest = restCount === 1 ? [] : restCount === 2 ? [2] : [1, 3]
   const restPositions = [5, ...extraRest]
 
-  let si = 0
+  // Relative weights per session type (will be normalised)
+  const weight = s => s === "Easy" ? 2.2 : s === "Tempo" ? 1.8 : s === "Intervals" ? 1.4 : s === "Recovery" ? 1.0 : 1.8
+
+  // Collect run day sessions (Mon–Fri only, not Sun)
+  const runDays = []
+  for (let i = 0; i < 6; i++) {
+    if (!restPositions.includes(i)) runDays.push(weekSessions[runDays.length % weekSessions.length])
+  }
+  const totalWeight = runDays.reduce((s, sess) => s + weight(sess), 0)
+
+  let ri = 0
   return Array.from({ length: 7 }, (_, i) => {
-    if (i === 6) return ["Long", 0.30]
+    if (i === 6) return ["Long", null]          // null = use lr directly
     if (restPositions.includes(i)) return ["Rest", 0]
-    const sess = weekSessions[si % weekSessions.length]; si++
-    const frac = sess === "Easy" ? 0.22 : sess === "Tempo" ? 0.18 : sess === "Intervals" ? 0.14 : sess === "Recovery" ? 0.10 : 0.18
+    const sess = runDays[ri++]
+    const frac = weight(sess) / totalWeight     // normalised: all weekday fracs sum to 1.0
     return [sess, frac]
   })
 }
@@ -265,7 +276,12 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
       const isDayBeforeRace = raceDate && date && addDays(date, 1).toDateString() === new Date(raceDate).toDateString()
 
       let finalSess = sess
-      let km = frac > 0 ? +(wk * frac).toFixed(1) : 0
+      // Long run (Sunday, frac=null) uses lr directly
+      // Other sessions share (wk - lr) proportionally — so all sessions sum to exactly wk
+      let km
+      if (sess === "Long")       km = +lr.toFixed(1)
+      else if (frac > 0)         km = +(frac * Math.max(0, wk - lr)).toFixed(1)
+      else                       km = 0
 
       // Override: never touch existing Rest slots
       if (sess !== "Rest") {
