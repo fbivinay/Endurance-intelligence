@@ -181,13 +181,22 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
       const isDayBeforeRace = raceDate && date && addDays(date, 1).toDateString() === new Date(raceDate).toDateString()
 
       // Override last day of plan and race day logic
+      // RULE: never override a day that is already Rest
       let finalSess = sess
       let km = frac > 0 ? +(wk * frac).toFixed(1) : 0
 
-      if (isRaceDay) { finalSess = "Rest"; km = 0 }
-      else if (isDayBeforeRace) { finalSess = "Warmup"; km = +(wk * 0.08).toFixed(1) }
-      else if (isLastWeek && di === 6) { finalSess = "Rest"; km = 0 }
-      else if (isSecondLast && di === 5) { finalSess = "Warmup"; km = +(wk * 0.12).toFixed(1) }
+      if (isRaceDay) {
+        finalSess = "Rest"; km = 0
+      } else if (isDayBeforeRace && sess !== "Rest") {
+        finalSess = "Warmup"; km = +(wk * 0.08).toFixed(1)
+      } else if (isLastWeek && di === 6) {
+        // Last Sunday of plan = Rest (race day or final rest)
+        finalSess = "Rest"; km = 0
+      } else if (isSecondLast && di === 6 && sess !== "Rest") {
+        // Second-last Sunday = short Warmup instead of Long Run
+        finalSess = "Warmup"; km = +(wk * 0.12).toFixed(1)
+      }
+      // Sat (di===5) is always Rest from buildWeekPattern — never override it
 
       const p = pace
       let paceStr = "--"
