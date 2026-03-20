@@ -188,22 +188,58 @@ function mlPredictTraining(goalTimeMinutes, raceKm, currentWeeklyKm, longestRun)
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PLAN BUILDER — with periodization (4-week mesocycles)
-// ─────────────────────────────────────────────────────────────────────────────
 const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PACE ZONES — Daniels VDOT-based (all derived from goal race pace)
+// Easy:      goal pace + 1.0–1.5 min/km  (conversational aerobic)
+// Long:      goal pace + 0.9–1.3 min/km  (slightly faster than easy)
+// Tempo:     goal pace + 0.3–0.6 min/km  (comfortably hard, lactate threshold)
+// Intervals: goal pace − 0.3–0.0 min/km  (5K effort, VO2max zone)
+// Recovery:  goal pace + 1.5–2.0 min/km  (very easy, active recovery)
+// ─────────────────────────────────────────────────────────────────────────────
+function getPaceZones(goalPacePerKm) {
+  const p = goalPacePerKm
+  return {
+    Easy:      [+(p + 1.0).toFixed(2), +(p + 1.5).toFixed(2)],
+    Long:      [+(p + 0.9).toFixed(2), +(p + 1.3).toFixed(2)],
+    Tempo:     [+(p + 0.3).toFixed(2), +(p + 0.6).toFixed(2)],
+    Intervals: [+(p - 0.3).toFixed(2), +(p + 0.0).toFixed(2)],
+    Recovery:  [+(p + 1.5).toFixed(2), +(p + 2.0).toFixed(2)],
+    Warmup:    [+(p + 1.2).toFixed(2), +(p + 1.6).toFixed(2)],
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLAN BUILDER — Pfitzinger/Daniels periodization principles
+//
+// VOLUME MODEL:
+//   - Start at user's current weekly km (real fitness baseline)
+//   - Build toward RACE_PEAK_KM[race][level] using compound 10% growth
+//   - 4-week mesocycle: weeks 1-3 build (+10%), week 4 recover (−20%)
+//   - KEY: 10% growth is always off LAST BUILD WEEK, not the recovery week
+//     e.g. W3=60km → W4 recovery=48km → W5 = 60×1.10 = 66km (not 48×1.10)
+//   - Last 2 weeks: taper (−30% each week from peak)
+//
+// LONG RUN (Pfitzinger):
+//   - Always 28–32% of weekly volume
+//   - Hard cap: min(race_distance × 0.9, 38km)
+//   - Grows naturally with weekly volume — no separate tracker needed
+//
+// SESSION DISTRIBUTION (Seiler 80/20 rule):
+//   - 80% of non-LR volume = Easy/Recovery runs
+//   - 20% of non-LR volume = Quality (Tempo + Intervals)
+//   - Quality split: 55% Tempo, 45% Intervals
+//   - All paces from Daniels VDOT zones off goal race pace
+// ─────────────────────────────────────────────────────────────────────────────
 function buildWeekPattern(restCount, weekSessions) {
-  // Sunday (idx 6) = always Long Run (km set from lr variable directly)
-  // Sat   (idx 5) = always Rest
-  // Other run days share the remaining (wk - lr) volume by relative weights
+  // Sat (idx 5) = always Rest | Sun (idx 6) = always Long Run
   const extraRest = restCount === 1 ? [] : restCount === 2 ? [2] : [1, 3]
   const restPositions = [5, ...extraRest]
 
-  // Relative weights per session type (will be normalised)
-  const weight = s => s === "Easy" ? 2.2 : s === "Tempo" ? 1.8 : s === "Intervals" ? 1.4 : s === "Recovery" ? 1.0 : 1.8
+  // 80/20 weights: Easy=4, Recovery=2, Tempo=1.4, Intervals=1.1
+  const weight = s => s === "Easy" ? 4.0 : s === "Tempo" ? 1.4 : s === "Intervals" ? 1.1 : s === "Recovery" ? 2.0 : 2.0
 
-  // Collect run day sessions (Mon–Fri only, not Sun)
   const runDays = []
   for (let i = 0; i < 6; i++) {
     if (!restPositions.includes(i)) runDays.push(weekSessions[runDays.length % weekSessions.length])
@@ -212,26 +248,20 @@ function buildWeekPattern(restCount, weekSessions) {
 
   let ri = 0
   return Array.from({ length: 7 }, (_, i) => {
-    if (i === 6) return ["Long", null]          // null = use lr directly
+    if (i === 6) return ["Long", null]        // km = lr directly
     if (restPositions.includes(i)) return ["Rest", 0]
     const sess = runDays[ri++]
-    const frac = weight(sess) / totalWeight     // normalised: all weekday fracs sum to 1.0
-    return [sess, frac]
+    return [sess, weight(sess) / totalWeight] // fraction of (wk - lr)
   })
 }
 
-function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate, raceDate, restDays, raceName) {
-  const tablePeak = (RACE_PEAK_KM[raceName] || RACE_PEAK_KM["Custom"])[level]
-  const longRunCap = Math.min(goalKm * 0.95, 38)
+function buildPlan(weeklyKm, goalKm, totalWeeks, goalPacePerKm, level, longRun, startDate, raceDate, restDays, raceName) {
+  // ── CONFIG ────────────────────────────────────────────────────────────────
+  const tablePeak  = (RACE_PEAK_KM[raceName] || RACE_PEAK_KM["Custom"])[level]
+  const longRunCap = Math.min(goalKm * 0.90, 38)   // Pfitzinger: never exceed 90% of race dist or 38km
+  const lrFrac     = 0.30                           // Long run = 30% of weekly volume (Daniels)
 
-  // ── CORE MODEL (reverse-engineered from working output) ──────────────────
-  // Week 1 starts AT the race-appropriate peak volume, not the user's Strava base.
-  // The user's Strava data (weeklyKm, longRun) is used only for level classification
-  // and ML prediction — the plan itself targets race-appropriate training volumes.
-  // Long run = user's actual Strava long run, growing +1.2km/week independently.
-  // Weekly total grows +10%/week from peak, recovery weeks drop -20% (lr holds steady).
-  // Weekday sessions share (wk - lr) by relative weights.
-
+  // Sessions: 5K/10K are speed-focused, longer races add more Easy volume
   const runCount = 7 - restDays
   const sessionPool = {
     4: ["Easy", "Tempo", "Easy", "Intervals"],
@@ -239,68 +269,90 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
     6: ["Easy", "Tempo", "Easy", "Intervals", "Recovery", "Easy"],
   }
   const weekSessions = sessionPool[Math.min(6, Math.max(4, runCount))] || sessionPool[5]
-  const base = startDate ? new Date(startDate) : null
+  const zones = getPaceZones(goalPacePerKm)
+  const base  = startDate ? new Date(startDate) : null
 
-  // Start wk at the race-appropriate peak (capped at what 10%/wk growth allows from Strava base)
-  const maxGrowthPeak = weeklyKm * Math.pow(1.10, totalWeeks - 2)
-  let wk = Math.min(tablePeak, maxGrowthPeak) * 0.80  // start at 80% of peak (matches old model)
-  let lr = Math.min(longRun, wk * 0.30)  // long run as % of starting volume, max 30%
+  // ── VOLUME PROGRESSION ───────────────────────────────────────────────────
+  // Pre-compute every week's target volume using last-build-week tracking.
+  // Recovery weeks dip but DO NOT reset the compound base.
+  const maxReachable = weeklyKm * Math.pow(1.10, totalWeeks - 2)
+  const peak = Math.min(tablePeak, maxReachable)
+
+  const weekVolumes = []
+  let lastBuildVol = weeklyKm  // tracks last hard week — the compound base
+
+  for (let i = 0; i < totalWeeks; i++) {
+    const n = i + 1
+    const isTaper = n > totalWeeks - 2
+    const cyclePos = ((n - 1) % 4) + 1  // 1,2,3 = build | 4 = recovery
+
+    if (isTaper) {
+      weekVolumes.push(null)  // computed during render
+    } else if (cyclePos === 4) {
+      // Recovery: 80% of last BUILD week. lastBuildVol unchanged.
+      weekVolumes.push(Math.round(lastBuildVol * 0.80 * 10) / 10)
+    } else {
+      // Build: +10% from last BUILD week
+      lastBuildVol = Math.min(peak, Math.round(lastBuildVol * 1.10 * 10) / 10)
+      weekVolumes.push(lastBuildVol)
+    }
+  }
+  const truePeak = weekVolumes.filter(Boolean).at(-1) || weeklyKm
+
+  // ── RENDER WEEKS ─────────────────────────────────────────────────────────
+  let taperVol = truePeak
 
   return Array.from({ length: totalWeeks }, (_, i) => {
-    const n = i + 1
-    const isLastWeek = n === totalWeeks
+    const n         = i + 1
+    const isLastWeek   = n === totalWeeks
     const isSecondLast = n === totalWeeks - 1
-    const taper = n > totalWeeks - 2
-    const cycleWeek = n % 4
+    const isTaper      = n > totalWeeks - 2
+    const cyclePos  = ((n - 1) % 4) + 1
+    const isRecoveryWeek = !isTaper && cyclePos === 4
 
-    // Original model: wk grows +10% each build week, -20% recovery, -30% taper
-    // lr grows +1.2km/week on build weeks, holds on recovery, drops hard on taper
-    if (taper) {
-      wk = Math.round(wk * 0.70 * 10) / 10
-      lr = Math.round(lr * 0.60 * 10) / 10
-    } else if (cycleWeek === 0) {
-      wk = Math.round(wk * 0.80 * 10) / 10
-      // lr holds on recovery week (doesn't grow, doesn't drop)
+    // Weekly volume for this week
+    let wk
+    if (isTaper) {
+      taperVol = Math.round(taperVol * 0.70 * 10) / 10
+      wk = taperVol
     } else {
-      wk = Math.min(tablePeak, Math.round(wk * 1.10 * 10) / 10)
-      lr = Math.min(longRunCap, Math.round((lr + 1.2) * 10) / 10)
+      wk = weekVolumes[i]
     }
 
-    const isRecoveryWeek = !taper && (n % 4) === 0 && n < totalWeeks - 1
+    // Long run = 30% of weekly volume, hard capped
+    const lr = Math.min(longRunCap, Math.round(wk * lrFrac * 10) / 10)
 
     const weekStart = base ? addDays(base, i * 7) : null
-    const weekEnd = weekStart ? addDays(weekStart, 6) : null
-    const pat = buildWeekPattern(restDays, weekSessions)
+    const weekEnd   = weekStart ? addDays(weekStart, 6) : null
+    const pat       = buildWeekPattern(restDays, weekSessions)
 
     const days = pat.map(([sess, frac], di) => {
-      const date = weekStart ? addDays(weekStart, di) : null
-      const isRaceDay = raceDate && date && date.toDateString() === new Date(raceDate).toDateString()
-      const isDayBeforeRace = raceDate && date && addDays(date, 1).toDateString() === new Date(raceDate).toDateString()
+      const date          = weekStart ? addDays(weekStart, di) : null
+      const isRaceDay     = raceDate && date && date.toDateString() === new Date(raceDate).toDateString()
+      const isDayBefore   = raceDate && date && addDays(date, 1).toDateString() === new Date(raceDate).toDateString()
 
       let finalSess = sess
-      // Long run (Sunday, frac=null) uses lr directly
-      // Other sessions share (wk - lr) proportionally — so all sessions sum to exactly wk
       let km
-      if (sess === "Long")       km = +lr.toFixed(1)
-      else if (frac > 0)         km = +(frac * Math.max(0, wk - lr)).toFixed(1)
-      else                       km = 0
+      if (sess === "Long")  km = +lr.toFixed(1)
+      else if (frac > 0)    km = +(frac * Math.max(0, wk - lr)).toFixed(1)
+      else                  km = 0
 
-      // Override: never touch existing Rest slots
+      // Race week overrides
       if (sess !== "Rest") {
-        if (isRaceDay) { finalSess = "Rest"; km = 0 }
-        else if (isDayBeforeRace) { finalSess = "Warmup"; km = +(wk * 0.08).toFixed(1) }
-        else if (isLastWeek && di === 6) { finalSess = "Rest"; km = 0 }
-        else if (isSecondLast && di === 6) { finalSess = "Warmup"; km = +(wk * 0.12).toFixed(1) }
+        if (isRaceDay)                             { finalSess = "Rest";   km = 0 }
+        else if (isDayBefore)                      { finalSess = "Warmup"; km = +(wk * 0.08).toFixed(1) }
+        else if (isLastWeek   && di === 6)         { finalSess = "Rest";   km = 0 }
+        else if (isSecondLast && di === 6)         { finalSess = "Warmup"; km = +(wk * 0.12).toFixed(1) }
       }
 
-      const p = pace
+      // Pace zones — Daniels VDOT based
       let paceStr = "--"
-      if (finalSess === "Easy")      paceStr = paceRangeDisplay(p, p + 0.4)
-      else if (finalSess === "Tempo")     paceStr = paceRangeDisplay(p - 0.7, p - 0.4)
-      else if (finalSess === "Long")      paceStr = paceRangeDisplay(p + 0.3, p + 0.6)
-      else if (finalSess === "Recovery")  paceStr = paceRangeDisplay(p + 0.6, p + 1.0)
-      else if (finalSess === "Intervals") paceStr = paceRangeDisplay(p - 1.2, p - 0.8)
-      else if (finalSess === "Warmup")    paceStr = paceRangeDisplay(p + 0.5, p + 0.8)
+      if (finalSess === "Easy")      paceStr = paceRangeDisplay(zones.Easy[0],      zones.Easy[1])
+      else if (finalSess === "Tempo")     paceStr = paceRangeDisplay(zones.Tempo[0],     zones.Tempo[1])
+      else if (finalSess === "Long")      paceStr = paceRangeDisplay(zones.Long[0],      zones.Long[1])
+      else if (finalSess === "Recovery")  paceStr = paceRangeDisplay(zones.Recovery[0],  zones.Recovery[1])
+      else if (finalSess === "Intervals") paceStr = paceRangeDisplay(zones.Intervals[0], zones.Intervals[1])
+      else if (finalSess === "Warmup")    paceStr = paceRangeDisplay(zones.Warmup[0],    zones.Warmup[1])
 
       return {
         day: DAYS_OF_WEEK[di], sess: finalSess, km, pace: paceStr,
@@ -310,7 +362,7 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, pace, level, longRun, startDate
 
     return {
       week: n, totalKm: +wk.toFixed(1), longRun: +lr.toFixed(1),
-      taper, isRecoveryWeek, days,
+      taper: isTaper, isRecoveryWeek, days,
       dateRange: weekStart ? `${formatDate(weekStart)} - ${formatDate(weekEnd)}` : null,
     }
   })
@@ -797,13 +849,16 @@ export default function App() {
     ? mlPredictTraining(goalTimeMins, goalKm, wkKm, lRun)
     : null
 
+  // goalRacePace = goal time / race distance (min/km) — used for all Daniels zone calculations
+  // Falls back to user's current pace if no goal time set
+  const goalRacePace = (goalTimeMins && goalKm) ? +(goalTimeMins / goalKm).toFixed(2) : pace
   const effectivePace  = mlPrediction ? mlPrediction.easyPace : pace
   // FIX 7: effectiveWkKm = always the user's CURRENT weekly km as starting point.
   // ML weeklyLoad is the TARGET peak — buildPlan already ramps up to it via RACE_PEAK_KM.
   // Multiplying weeklyLoad * 0.55 made the plan START at 82km for Ultra, not 24km.
   const effectiveWkKm  = wkKm
 
-  const plan  = buildPlan(effectiveWkKm, goalKm, totalWeeks, effectivePace, level, lRun, alignedStartDate, raceDate, restDays, race)
+  const plan  = buildPlan(effectiveWkKm, goalKm, totalWeeks, goalRacePace, level, lRun, alignedStartDate, raceDate, restDays, race)
   const peak  = Math.max(...plan.map(w => w.totalKm))
   const chart = plan.map(w => ({ week: w.week, "Weekly Load": w.totalKm, "Long Run": w.longRun }))
 
