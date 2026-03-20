@@ -510,7 +510,7 @@ function exportPlanToPDF(plan, athlete, race, goalTime, level, startDate, raceDa
 // ─────────────────────────────────────────────────────────────────────────────
 // UI COMPONENTS
 // ─────────────────────────────────────────────────────────────────────────────
-function Field({ label, min, max, step, value, onChange, unit = "", accent, hint }) {
+function Field({ label, min, max, step, value, onChange, unit = "", accent, hint, display }) {
   const [raw, setRaw] = useState(String(value))
   const [focused, setFoc] = useState(false)
   useEffect(() => { if (!focused) setRaw(String(value)) }, [value, focused])
@@ -528,13 +528,15 @@ function Field({ label, min, max, step, value, onChange, unit = "", accent, hint
     borderRadius: 10, color: T.textPrime, cursor: "pointer", fontSize: 22, fontWeight: 700,
     display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
   }
+  // When not focused: show display value (e.g. "5:58 min/km") instead of raw decimal
+  const shownValue = focused ? raw : (display ? display : `${value}${unit}`)
   return (
     <div style={{ marginBottom: 20 }}>
       <div style={{ fontSize: 14, fontWeight: 600, color: T.textSub, fontFamily: T.body, marginBottom: 7 }}>{label}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button style={btnStyle} onClick={() => onChange(Math.max(min, +(value - step).toFixed(2)))}>-</button>
         <input type="text"
-          value={focused ? raw : `${value}${unit}`}
+          value={shownValue}
           onFocus={() => { setFoc(true); setRaw(String(value)) }}
           onBlur={() => { setFoc(false); commit(raw) }}
           onChange={e => setRaw(e.target.value)} onKeyDown={onKey}
@@ -880,13 +882,21 @@ export default function App() {
   const peak  = Math.max(...plan.map(w => w.totalKm))
   const chart = plan.map(w => ({ week: w.week, "Weekly Load": w.totalKm, "Long Run": w.longRun }))
 
-  // Decay
-  const decayModifier  = trainingDaysDone < 14 ? 0.85 : trainingDaysDone > 60 ? 1.10 : 1.0
-  const effectiveDecay = cfg.decay * decayModifier
+
+  // ── FITNESS DECAY MODEL (Mujika & Padilla 2000) ───────────────────────────
+  // Aerobic fitness decays exponentially: F(t) = 100 × e^(−k×t)
+  // Decay constant k depends on:
+  //   1. Fitness level (Elite decay slowest — larger aerobic base)
+  //   2. Training history (more days trained = larger base = slower decay)
+  //      Science: each week of consistent training reduces decay rate by ~1.5%
+  //      Plateau at ~6 months (180 days) — beyond that, marginal gains
+  // trainingDaysDone directly scales the decay constant continuously.
+  const trainingEffect = Math.min(0.40, trainingDaysDone / 180 * 0.40)  // 0% → 40% reduction
+  const effectiveDecay = cfg.decay * (1 - trainingEffect)
   const decayData      = Array.from({ length: 61 }, (_, d) => ({ day: d, fitness: +(Math.exp(-effectiveDecay * d) * 100).toFixed(1) }))
   const fLoss          = +(100 - Math.exp(-effectiveDecay * daysOff) * 100).toFixed(2)
   const recoveryDays   = Math.round(daysOff * 0.50)
-  const returnPace     = +(effectivePace * (1 + (fLoss / 100) * 0.5)).toFixed(2)
+  const returnPace     = +(goalRacePace * (1 + (fLoss / 100) * 0.5)).toFixed(2)
   const returnKm       = +(effectiveWkKm * (0.50 + (1 - fLoss / 100) * 0.3)).toFixed(1)
 
   const stravaStats = stravaRuns && stravaRuns.length ? computeStatsFromRuns(stravaRuns) : null
@@ -1082,7 +1092,7 @@ export default function App() {
 
               <Field label="Current Weekly Mileage" min={1} max={9999} step={1} value={wkKm} onChange={setWkKm} unit=" km" accent={acc} hint="1 km to unlimited" />
               <Field label="Longest Recent Run" min={1} max={9999} step={0.5} value={lRun} onChange={setLRun} unit=" km" accent={acc} hint="1 km to unlimited" />
-              {!mlPrediction && <Field label="Easy Pace" min={3.0} max={12.0} step={0.05} value={pace} onChange={setPace} unit=" min/km" accent={acc} hint={`Displayed as ${paceToDisplay(pace)} /km`} />}
+              {!mlPrediction && <Field label="Easy Pace" min={3.0} max={12.0} step={0.05} value={pace} onChange={setPace} unit=" min/km" accent={acc} display={`${paceToDisplay(pace)} min/km`} hint="Click to edit as decimal, shown as M:SS" />}
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
                 <Stat label="Race Distance" value={goalKm} unit="km" color={acc} />
@@ -1189,7 +1199,7 @@ export default function App() {
                   ["Return pace",      `${paceToDisplay(returnPace)} /km`],
                   ["Return volume",    `~${returnKm} km/wk`],
                   ["Decay k",          effectiveDecay.toFixed(5)],
-                  ["Base modifier",    trainingDaysDone < 14 ? "×0.85 (early)" : trainingDaysDone > 60 ? "×1.10 (strong)" : "×1.00 (normal)"],
+                  ["Training effect",  `-${(Math.min(0.40, trainingDaysDone / 180 * 0.40) * 100).toFixed(0)}% slower decay`],
                 ].map(([lbl, val]) => (
                   <div key={lbl} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid rgba(255,255,255,0.07)" }}>
                     <span style={{ fontSize: 14, fontWeight: 500, color: T.textSub, fontFamily: T.body }}>{lbl}</span>
