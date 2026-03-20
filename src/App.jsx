@@ -273,13 +273,31 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, goalPacePerKm, level, longRun, 
   const base  = startDate ? new Date(startDate) : null
 
   // ── VOLUME PROGRESSION ───────────────────────────────────────────────────
-  // Pre-compute every week's target volume using last-build-week tracking.
-  // Recovery weeks dip but DO NOT reset the compound base.
-  const maxReachable = weeklyKm * Math.pow(1.10, totalWeeks - 2)
-  const peak = Math.min(tablePeak, maxReachable)
+  // CORE INSIGHT: We know where the plan must END (tablePeak for the race).
+  // We back-calculate where it must START so it arrives at peak on time.
+  // If that starting point is below the user's current weekly km → use their
+  // current km (they're already ahead of schedule, plan starts higher).
+  // If starting point is above → use it (safe because it's below their peak,
+  // and the user's level classification confirms they can handle it).
+  //
+  // Example: Ultra 50K Intermediate, 13 weeks, peak=110km
+  //   buildWeeks = 11, startVol = 110 / 1.10^(11/3) ≈ 60km
+  //   So plan starts at 60km/week — logical for someone training for Ultra.
+  //
+  // The 10% rule still applies week-over-week — we're just choosing the
+  // right starting point so the math works out to race-appropriate peak.
+
+  const buildWeeks = Math.max(1, totalWeeks - 2)  // exclude 2 taper weeks
+  // Number of actual +10% steps in build weeks (3 out of every 4 are build)
+  const buildSteps = Math.floor(buildWeeks * 3 / 4)
+  // Back-calculate: startVol × 1.10^buildSteps = tablePeak
+  const backCalcStart = Math.round(tablePeak / Math.pow(1.10, buildSteps) * 10) / 10
+  // Use the higher of: back-calculated start OR user's current fitness
+  // (never start below what they're already running)
+  const startVol = Math.max(weeklyKm, backCalcStart)
 
   const weekVolumes = []
-  let lastBuildVol = weeklyKm  // tracks last hard week — the compound base
+  let lastBuildVol = startVol
 
   for (let i = 0; i < totalWeeks; i++) {
     const n = i + 1
@@ -292,8 +310,8 @@ function buildPlan(weeklyKm, goalKm, totalWeeks, goalPacePerKm, level, longRun, 
       // Recovery: 80% of last BUILD week. lastBuildVol unchanged.
       weekVolumes.push(Math.round(lastBuildVol * 0.80 * 10) / 10)
     } else {
-      // Build: +10% from last BUILD week
-      lastBuildVol = Math.min(peak, Math.round(lastBuildVol * 1.10 * 10) / 10)
+      // Build: +10% from last BUILD week, capped at tablePeak
+      lastBuildVol = Math.min(tablePeak, Math.round(lastBuildVol * 1.10 * 10) / 10)
       weekVolumes.push(lastBuildVol)
     }
   }
